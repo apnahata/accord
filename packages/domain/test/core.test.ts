@@ -25,3 +25,28 @@ test("hard checks keep private budget, refund and unknown accessibility authorit
   assert.equal(result.feasible, true);
   assert.deepEqual(Object.values(result.shares), [30000, 30000, 30000, 30000]);
 });
+
+test("check-in windows are enforced as hard constraints", () => {
+  const [offer] = demoCatalog();
+  const base = { maxContributionCents: 100000, requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "" };
+  const tooEarly = checkMember(offer!, { ...base, earliestCheckInAt: "2027-03-10T22:00:00.000Z" }, 30000, 4);
+  const tooLate = checkMember(offer!, { ...base, latestCheckInAt: "2027-03-10T20:00:00.000Z" }, 30000, 4);
+  const inWindow = checkMember(offer!, { ...base, earliestCheckInAt: "2027-03-10T20:00:00.000Z", latestCheckInAt: "2027-03-10T22:00:00.000Z" }, 30000, 4);
+  assert.equal(tooEarly.find(check => check.kind === "CHECKIN_EARLIEST")!.status, "FAIL");
+  assert.equal(tooLate.find(check => check.kind === "CHECKIN_LATEST")!.status, "FAIL");
+  assert.equal(inWindow.find(check => check.kind === "CHECKIN_EARLIEST")!.status, "PASS");
+  assert.equal(inWindow.find(check => check.kind === "CHECKIN_LATEST")!.status, "PASS");
+});
+
+test("date-only availability never invents a hotel time", () => {
+  const [offer] = demoCatalog();
+  const base = { maxContributionCents: 100000, requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "" };
+  const dateOnly = checkMember({ ...offer!, checkInTimeKnown: false, checkOutTimeKnown: false }, {
+    ...base, earliestCheckInDate: "2027-03-10", latestCheckOutDate: "2027-03-14",
+  }, 30000, 4);
+  assert.equal(dateOnly.find(check => check.kind === "CHECKIN_DATE_EARLIEST")!.status, "PASS");
+  assert.equal(dateOnly.find(check => check.kind === "CHECKOUT_DATE")!.status, "PASS");
+  assert.equal(dateOnly.find(check => check.kind === "CHECKIN_EARLIEST")!.status, "PASS", "no time preference means an unknown hotel time is acceptable");
+  const explicitTime = checkMember({ ...offer!, checkInTimeKnown: false }, { ...base, earliestCheckInAt: "2027-03-10T20:00:00.000Z" }, 30000, 4);
+  assert.equal(explicitTime.find(check => check.kind === "CHECKIN_EARLIEST")!.status, "UNKNOWN", "an explicit time cannot pass without provider evidence");
+});

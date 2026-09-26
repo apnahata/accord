@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createApi } from "../src/server.js";
 import { localToInstant } from "../src/stays.js";
+import type { PaymentGateway } from "../src/payments.js";
 
 // Provider responses are controlled here; the live APIs are exercised manually, not in CI.
 const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
@@ -33,7 +34,15 @@ function providers(options: { hotelStepFree?: boolean } = {}) {
 }
 
 async function start(fetcher: typeof fetch) {
-  const app = createApi({ liteApiKey: "test", serpApiKey: "test", staysFetch: fetcher, geminiApiKey: "", geminiModel: "" });
+  let paymentSequence = 0;
+  const paymentCalls = { authorize: 0, capture: 0, reverse: 0 };
+  const payment: PaymentGateway = {
+    provider: "CYBERSOURCE", environment: "SANDBOX",
+    async authorize() { paymentCalls.authorize++; return { id: `auth-${++paymentSequence}`, status: "AUTHORIZED" }; },
+    async capture() { paymentCalls.capture++; return { id: `capture-${++paymentSequence}`, status: "PENDING" }; },
+    async reverse() { paymentCalls.reverse++; return { id: `reversal-${++paymentSequence}`, status: "REVERSED" }; },
+  };
+  const app = createApi({ liteApiKey: "test", serpApiKey: "test", staysFetch: fetcher, geminiApiKey: "", geminiModel: "", payment });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
@@ -42,7 +51,7 @@ async function start(fetcher: typeof fetch) {
     return { status: response.status, data: await response.json() as any, cookie: response.headers.get("set-cookie")?.split(";")[0] };
   };
   const stop = async () => { app.state.streams.close(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); };
-  return { call, stop };
+  return { call, stop, paymentCalls };
 }
 
 async function group(call: Awaited<ReturnType<typeof start>>["call"], limits: Record<string, Partial<{ maxContributionCents: number; requiresFullCashRefund: boolean; requiresStepFreeAccess: boolean }>>) {
@@ -58,10 +67,13 @@ async function group(call: Awaited<ReturnType<typeof start>>["call"], limits: Re
   return { roomId: created.data.roomId as string, cookies };
 }
 
-async function consentAll(call: Awaited<ReturnType<typeof start>>["call"], proposal: any, cookies: Record<string, string>) {
-  for (const [name, cookie] of Object.entries(cookies)) {
+async function consentAll(call: Awaited<ReturnType<typeof start>>["call"], proposal: any, cookies: Record<string, string>, beforeLast?: () => void) {
+  const entries = Object.entries(cookies);
+  for (const [index, [name, cookie]] of entries.entries()) {
+    if (index === entries.length - 1) beforeLast?.();
     const mine = (await call(`/proposals/${proposal.proposalId}/me`, "GET", undefined, cookie)).data;
-    assert.equal((await call(`/proposals/${proposal.proposalId}/consent`, "POST", { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: mine.myContributionCents }, cookie, `c-${name}-${proposal.version}`)).status, 200);
+    const response = await call(`/proposals/${proposal.proposalId}/consent`, "POST", { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: mine.myContributionCents }, cookie, `c-${name}-${proposal.version}`);
+    if (!beforeLast || index < entries.length - 1) assert.equal(response.status, 200);
   }
 }
 
@@ -73,7 +85,7 @@ test("converts destination wall-clock times to instants", () => {
 
 test("live search: real-provider offers are checked privately and booked through the LiteAPI sandbox", async t => {
   const mock = providers();
-  const { call, stop } = await start(mock.fetcher);
+  const { call, stop, paymentCalls } = await start(mock.fetcher);
   t.after(stop);
   const { roomId, cookies } = await group(call, { Alex: {}, Jordan: { requiresFullCashRefund: true } });
   const solved = await call(`/rooms/${roomId}/solve`, "POST", {}, cookies.Alex);
@@ -96,25 +108,34 @@ test("live search: real-provider offers are checked privately and booked through
   assert.equal(booked.data.status, "CONFIRMED");
   assert.equal(booked.data.bookingReference, "BK1");
   assert.match(booked.data.providerModeLabel, /SANDBOX/);
+  assert.equal(booked.data.payment.transactionCount, 1);
+  assert.equal(booked.data.payment.capturedTotalCents, 90000);
+  assert.match(booked.data.payment.transactionId, /^capture-/);
+  const alexActivity = (await call("/me", "GET", undefined, cookies.Alex)).data.payments.filter((item: any) => item.proposalId === solved.data.proposal.proposalId);
+  assert.deepEqual(alexActivity.map((item: any) => item.status), ["CAPTURED", "AUTHORIZED", "COMMITTED"]);
+  assert.ok(alexActivity.every((item: any) => item.amountCents === 45000), "each member sees only their allocation, not another member's private commitment");
   const retry = await call(`/proposals/${solved.data.proposal.proposalId}/execute`, "POST", { proposalHash: solved.data.proposal.proposalHash }, cookies.Alex, "book-1");
   assert.equal(retry.data.bookingReference, "BK1");
   assert.equal(mock.calls.book, 1);
+  assert.deepEqual(paymentCalls, { authorize: 1, capture: 1, reverse: 0 });
 });
 
 test("live search: a price change found at booking time stales consent instead of booking", async t => {
   const mock = providers();
-  const { call, stop } = await start(mock.fetcher);
+  const { call, stop, paymentCalls } = await start(mock.fetcher);
   t.after(stop);
   const { roomId, cookies } = await group(call, { Alex: {}, Jordan: { requiresFullCashRefund: true } });
   const proposal = (await call(`/rooms/${roomId}/solve`, "POST", {}, cookies.Alex)).data.proposal;
-  await consentAll(call, proposal, cookies);
-  mock.state.refundableCents = 96000;
-  const blocked = await call(`/proposals/${proposal.proposalId}/execute`, "POST", { proposalHash: proposal.proposalHash }, cookies.Alex, "book-2");
-  assert.equal(blocked.data.code, "PROPOSAL_STALE");
+  await consentAll(call, proposal, cookies, () => { mock.state.refundableCents = 96000; });
   assert.equal(mock.calls.book, 0);
+  assert.deepEqual(paymentCalls, { authorize: 1, capture: 0, reverse: 1 });
   const view = (await call(`/proposals/${proposal.proposalId}/public`, "GET", undefined, cookies.Jordan)).data;
   assert.equal(view.proposal.state, "STALE");
   assert.deepEqual(view.changes.find((c: any) => c.label === "Total price"), { label: "Total price", before: "$900.00", after: "$960.00" });
+  const history = (await call("/me", "GET", undefined, cookies.Alex)).data;
+  const released = history.payments.find((payment: any) => payment.proposalId === proposal.proposalId);
+  assert.equal(released.status, "RELEASED");
+  assert.match(released.transactionId, /^reversal-/);
   const replanned = await call(`/rooms/${roomId}/solve`, "POST", { replan: true }, cookies.Alex);
   assert.equal(replanned.data.proposal.offer.totalCents, 96000);
   assert.equal(mock.calls.serp, 1, "vacation-rental results are cached between searches");
@@ -127,14 +148,21 @@ test("a member leaving stales consent and each remaining member privately sees t
   const { roomId, cookies } = await group(call, { Alex: {}, Jordan: { maxContributionCents: 40000, requiresFullCashRefund: true }, Mateo: {} });
   const proposal = (await call(`/rooms/${roomId}/solve`, "POST", {}, cookies.Alex)).data.proposal;
   assert.equal(proposal.equalShareCents, 30000);
-  await consentAll(call, proposal, cookies);
+  for (const name of ["Alex", "Jordan"]) {
+    const mine = (await call(`/proposals/${proposal.proposalId}/me`, "GET", undefined, cookies[name]!)).data;
+    assert.equal((await call(`/proposals/${proposal.proposalId}/consent`, "POST", { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: mine.myContributionCents }, cookies[name], `c-${name}`)).status, 200);
+  }
   assert.equal((await call(`/rooms/${roomId}/me/leave`, "POST", {}, cookies.Alex)).data.code, "HOST_CANNOT_LEAVE");
   const left = await call(`/rooms/${roomId}/me/leave`, "POST", {}, cookies.Mateo);
   assert.equal(left.status, 200);
-  assert.equal((await call(`/rooms/${roomId}`, "GET", undefined, cookies.Mateo)).status, 401);
+  assert.equal((await call(`/rooms/${roomId}`, "GET", undefined, cookies.Mateo)).status, 403);
+  const accountAfterLeaving = await call("/me", "GET", undefined, cookies.Mateo);
+  assert.equal(accountAfterLeaving.status, 200, "leaving a group must not sign the user out of their account");
+  assert.equal(accountAfterLeaving.data.groups.some((group: any) => group.roomId === roomId), false);
   const view = (await call(`/proposals/${proposal.proposalId}/public`, "GET", undefined, cookies.Alex)).data;
   assert.equal(view.proposal.state, "STALE");
-  assert.equal(view.proposal.authorization.authorizedCount, 0);
+  assert.equal(view.proposal.authorization.status, "PENDING");
+  assert.equal(view.proposal.authorization.transactionCount, 0);
   assert.deepEqual(view.changes.find((c: any) => c.label === "Equal share"), { label: "Equal share", before: "$300.00", after: "$450.00" });
   assert.ok(!JSON.stringify(view).includes("40000"));
   const jordan = (await call(`/proposals/${proposal.proposalId}/me`, "GET", undefined, cookies.Jordan)).data;
@@ -143,16 +171,16 @@ test("a member leaving stales consent and each remaining member privately sees t
   assert.equal(alex.myConstraintChecks.find((c: any) => c.kind === "BUDGET").status, "PASS");
 });
 
-test("an approved vacation rental hands off to the listing site instead of claiming a booking", async t => {
+test("Google comparisons are shown but cannot become an automated booking proposal", async t => {
   const mock = providers({ hotelStepFree: false });
   const { call, stop } = await start(mock.fetcher);
   t.after(stop);
   const { roomId, cookies } = await group(call, { Alex: {}, Mateo: { requiresStepFreeAccess: true } });
-  const proposal = (await call(`/rooms/${roomId}/solve`, "POST", {}, cookies.Alex)).data.proposal;
-  assert.equal(proposal.offer.source, "GOOGLE_HOTELS");
-  await consentAll(call, proposal, cookies);
-  const receipt = await call(`/proposals/${proposal.proposalId}/execute`, "POST", { proposalHash: proposal.proposalHash }, cookies.Alex, "book-3");
-  assert.equal(receipt.data.status, "HANDOFF");
-  assert.equal(receipt.data.externalUrl, "https://example.com/beach-house");
+  const solved = await call(`/rooms/${roomId}/solve`, "POST", {}, cookies.Alex);
+  assert.equal(solved.status, 409);
+  assert.equal(solved.data.code, "NO_FEASIBLE_OFFER");
+  const offers = (await call(`/rooms/${roomId}/offers`, "GET", undefined, cookies.Alex)).data;
+  assert.equal(offers.offers.find((offer: any) => offer.source === "GOOGLE_HOTELS").feasible, true);
+  assert.equal(offers.recommendedOfferId, undefined);
   assert.equal(mock.calls.book, 0);
 });

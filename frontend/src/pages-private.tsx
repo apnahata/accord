@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Check, LockKeyhole, Mic, Sparkles, Square } from 'lucide-react';
 import { Button, ErrorNotice, LinkButton, Loading, PageHeading, PrivateNote, Tag } from './components';
-import { api, dateTime, money, post, segment } from './api';
+import { api, calendarDate, dateTime, money, post, segment } from './api';
 import { useAction, useResource } from './hooks';
 import type { Capabilities, CapsuleDTO, Constraints, MemoryDTO } from './contracts';
 
 export function BoundaryList({ constraints }: { constraints: Constraints }) {
-  return <dl className="boundary-list"><div><dt>Maximum personal contribution</dt><dd>{money(constraints.maxContributionCents)}</dd></div>{constraints.latestCheckOutAt && <div><dt>Must check out by</dt><dd>{dateTime(constraints.latestCheckOutAt)}</dd></div>}<div><dt>Full cash refund</dt><dd>{constraints.requiresFullCashRefund ? 'Required' : 'Not set as a requirement'}</dd></div><div><dt>Verified step-free access</dt><dd>{constraints.requiresStepFreeAccess ? 'Required' : 'Not set as a requirement'}</dd></div></dl>;
+  const hasDateOrTime = constraints.earliestCheckInDate || constraints.latestCheckInDate || constraints.latestCheckOutDate || constraints.earliestCheckInAt || constraints.latestCheckInAt || constraints.latestCheckOutAt;
+  return <dl className="boundary-list"><div><dt>Maximum personal contribution</dt><dd>{money(constraints.maxContributionCents)}</dd></div>{constraints.earliestCheckInDate && <div><dt>Arrive no earlier than</dt><dd>{calendarDate(constraints.earliestCheckInDate)}</dd></div>}{constraints.latestCheckInDate && <div><dt>Arrive no later than</dt><dd>{calendarDate(constraints.latestCheckInDate)}</dd></div>}{constraints.latestCheckOutDate && <div><dt>Depart no later than</dt><dd>{calendarDate(constraints.latestCheckOutDate)}</dd></div>}{constraints.earliestCheckInAt && <div><dt>Check in no earlier than</dt><dd>{dateTime(constraints.earliestCheckInAt)}</dd></div>}{constraints.latestCheckInAt && <div><dt>Check in no later than</dt><dd>{dateTime(constraints.latestCheckInAt)}</dd></div>}{constraints.latestCheckOutAt && <div><dt>Must check out by</dt><dd>{dateTime(constraints.latestCheckOutAt)}</dd></div>}{!hasDateOrTime && <div><dt>Dates and arrival/departure times</dt><dd>No personal restriction</dd></div>}<div><dt>Full cash refund</dt><dd>{constraints.requiresFullCashRefund ? 'Required' : 'Not set as a requirement'}</dd></div><div><dt>Verified step-free access</dt><dd>{constraints.requiresStepFreeAccess ? 'Required' : 'Not set as a requirement'}</dd></div></dl>;
 }
 
 export function Voice({ onTranscript, onError }: { onTranscript: (text: string) => void; onError: (error: Error) => void }) {

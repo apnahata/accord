@@ -4,7 +4,7 @@ Accord helps groups plan and purchase a shared stay while keeping each member's 
 
 ## Run the local demo
 
-Requirements: Node 22 and npm. Without `MONGODB_URI` the local API uses process memory, and restarting it resets rooms, sessions, approvals, merchant mutations and bookings. `npm run dev:api` reads a root `.env` file if present (see [MongoDB persistence](#mongodb-persistence)). All listings and payment authorizations are explicitly simulated. No external account is required for the local core flow.
+Requirements: Node 22 and npm. Without `MONGODB_URI` the local API uses process memory, and restarting it resets users, rooms, sessions, approvals, merchant mutations and bookings. `npm run dev:api` reads a root `.env` file if present (see [MongoDB persistence](#mongodb-persistence)). Live groups use Nuitée Connect sandbox inventory/bookings and CyberSource sandbox payments when configured; no real card or real hotel reservation is created.
 
 ```sh
 npm ci
@@ -19,7 +19,13 @@ npm run dev:web
 
 Open the Vite URL shown in the terminal. It proxies `/api` to `http://localhost:3000`. Alternatively, run `npm run build` and open `http://localhost:3000`; the API serves the built frontend itself.
 
-Create a group as Alex, open the invite in three separate browser profiles, and join as Priya, Jordan and Mateo. The private intake is conversation-first when Gemini is configured: Accord asks a functional clarification, then shows an unconfirmed draft for review. Without a verified model connection, it says AI is unavailable and opens manual entry. Confirm the brief's private constraints. Solve to see the $1,200 Miami demo stay. All four members approve and authorize their **simulated** $300 shares. From Alex's authenticated merchant console, increase Miami to $1,440. The old consent becomes stale; Alex privately sees that the new $360 share exceeds his $350 cap. Replan to the $1,120 Tampa demo stay, get four fresh $280 authorizations, and book once. The receipt clearly says no card was charged and no real accommodation was reserved.
+For a QR code that opens on a phone, set `PUBLIC_APP_URL` to the laptop's reachable LAN or tunnel URL and open that same URL in the host browser. A QR containing `localhost` can only work on the computer that generated it.
+
+Create four email/password accounts (sign out between accounts if you use one browser, or use separate profiles to view them simultaneously). The host creates a live trip and shares its invite. Each member confirms private requirements; Gemini may parse the conversation, but the deterministic solver alone decides feasibility. Once every member approves an exact contribution, Accord creates one shared CyberSource sandbox authorization for the group total, re-quotes and books the exact Nuitée Connect sandbox rate, then captures the one shared payment. The host can open **Demo event controls** from the group page to change Accord's observed offer and demonstrate stale consent and reversal.
+
+## Frictionless accounts and history
+
+Accord requires a normal email/password account before creating or joining a group. Passwords are salted and hashed; login creates a cryptographically random 30-day `HttpOnly`, `SameSite=Lax` session, while the server stores only its SHA-256 hash. One account can belong to multiple groups and works across browsers. `/me` lists active groups, confirmed bookings, the member's contribution commitments, and that member's allocation in shared payment events. Group booking confirmations are visible to every active member.
 
 ## Live stay search
 
@@ -40,7 +46,7 @@ MONGODB_DB=accord
 ACCORD_ENCRYPTION_KEY=   # 32 random bytes, base64
 ```
 
-Rooms, members, sessions, invitations, proposals, approvals, authorizations, bookings and merchant inventory are then stored in Atlas and reloaded on restart. Private constraints are stored only as AES-256-GCM ciphertext. The process keeps an in-memory working copy and writes every change in one Mongo transaction before responding, so run exactly one API process. `/api/health` reports `mongo: UP` after a live ping. `npm run test:mongo` runs a restart-recovery test against a throwaway database on that cluster. The demo reset endpoint deletes all stored rooms and merchant changes.
+Users, rooms, memberships, sessions, invitations, proposals, approvals, the append-only payment ledger, shared authorization/capture/reversal state, bookings and merchant inventory are stored in Atlas and reloaded on restart. Private constraints are stored only as AES-256-GCM ciphertext. The process keeps an in-memory working copy and writes every change in one Mongo transaction before responding, so run exactly one API process. `/api/health` reports `mongo: UP` after a live ping. `npm run test:mongo` runs a restart-recovery test against a throwaway database on that cluster. The demo reset endpoint deletes all stored users, rooms, sessions and merchant changes.
 
 ## Verify
 
@@ -59,8 +65,8 @@ After the group searches, members can ask Gemini to explain the backend-selected
 ## Ownership and limitations
 
 - `packages/domain` owns validated constraints, merchant mutation schema, deterministic feasibility, equal shares, proposal hashes and shared frontend DTO types. The frontend imports its types from this package.
-- `packages/server` owns sessions, authenticated API routes, room/proposal state and the local simulated booking flow. It binds the merchant and SSE adapters from `packages/integrations`.
+- `packages/server` owns accounts, sessions, authenticated API routes, room/proposal state, the shared payment ledger, and sandbox booking orchestration. It binds the merchant and SSE adapters from `packages/integrations`.
 - `packages/integrations` contains provider and merchant transports. Optional sponsor services stay unavailable until configured and proven live.
 - `deploy` contains a Vultr-ready template, not an actual deployment. It requires a real integrated image, `MONGODB_URI`/`ACCORD_ENCRYPTION_KEY`, host and DNS before a production claim. Without Mongo configured the API reports `UNCONFIGURED` and deliberately fails the deployment readiness gate.
 
-Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Member contributions are simulated (no card is charged); stays are real provider inventory, booked in LiteAPI's sandbox or handed off to the listing site; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. One live local Gemini intake call has been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. Live local Gemini intake and explanation calls have been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.
+Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. CyberSource calls and the shared funding card are sandbox-only, so no real money moves. Stays are live provider inventory booked in Nuitée Connect's sandbox, so no real-world room is reserved. Backboard, Tiger, Solana and ElevenLabs remain unavailable in this branch. Gemini intake has been verified live with `gemini-3.5-flash-lite`, but Gemini never decides feasibility or grants payment permission. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.

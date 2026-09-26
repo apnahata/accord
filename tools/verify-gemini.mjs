@@ -13,14 +13,21 @@ await once(app.server, "listening");
 const base = "http://127.0.0.1:" + app.server.address().port + "/api";
 
 try {
-  const createdResponse = await fetch(base + "/rooms", {
+  const registeredResponse = await fetch(base + "/auth/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "Live Gemini verification", goal: "A shared stay in Miami", displayName: "Test member" }),
+    body: JSON.stringify({ displayName: "Test member", email: "gemini-verifier@example.test", password: "gemini verifier password" }),
+  });
+  const cookie = registeredResponse.headers.get("set-cookie")?.split(";")[0];
+  if (registeredResponse.status !== 201 || !cookie) throw new Error("TEST_ACCOUNT_FAILED");
+  const createdResponse = await fetch(base + "/rooms", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ name: "Live Gemini verification", goal: "A shared stay in Miami" }),
   });
   const created = await createdResponse.json();
-  const cookie = createdResponse.headers.get("set-cookie")?.split(";")[0];
-  if (createdResponse.status !== 201 || !cookie) throw new Error("TEST_ROOM_FAILED");
+  const roomCookie = createdResponse.headers.get("set-cookie")?.split(";")[0] ?? cookie;
+  if (createdResponse.status !== 201) throw new Error(`TEST_ROOM_FAILED:${createdResponse.status}:${created.code ?? "UNKNOWN"}`);
 
   const route = base + "/rooms/" + created.roomId;
   const messages = [{ role: "user", content: "My personal maximum is $350. I must check out by Sunday, March 14, 2027 at noon Eastern Time. I would prefer a walkable neighborhood." }];
@@ -29,7 +36,7 @@ try {
   for (let turn = 0; turn < 4; turn++) {
     const response = await fetch(route + "/me/intake/extract", {
       method: "POST",
-      headers: { "content-type": "application/json", cookie },
+      headers: { "content-type": "application/json", cookie: roomCookie },
       body: JSON.stringify({ messages }),
     });
     httpStatus = response.status;
@@ -39,7 +46,7 @@ try {
     messages.push({ role: "assistant", content: draft.reply });
     messages.push({ role: "user", content: "To clarify: $350 is a firm personal maximum. Checkout must be no later than Sunday, March 14, 2027 at 12:00 PM in America/New_York. Walkability is only a preference. I do not require a full cash refund or step-free access." });
   }
-  const savedResponse = await fetch(route + "/me/constraints", { headers: { cookie } });
+  const savedResponse = await fetch(route + "/me/constraints", { headers: { cookie: roomCookie } });
   const saved = await savedResponse.json();
   const proof = {
     observedAt: new Date().toISOString(),

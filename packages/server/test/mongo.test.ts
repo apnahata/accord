@@ -9,7 +9,7 @@ import { MongoPersistence } from "../src/persistence.js";
 // Runs against a real Mongo replica set (e.g. Atlas) only when MONGODB_URI is set. Uses and drops a throwaway database.
 const uri = process.env.MONGODB_URI;
 
-test("room, private constraints, consent and booking survive a coordinator restart", { skip: !uri && "MONGODB_URI not set", timeout: 180_000 }, async t => {
+test("account, room, private constraints, consent and booking survive a coordinator restart", { skip: !uri && "MONGODB_URI not set", timeout: 180_000 }, async t => {
   const dbName = `accord_test_${randomBytes(4).toString("hex")}`;
   const key = randomBytes(32).toString("base64");
   const raw = new MongoClient(uri!);
@@ -39,15 +39,19 @@ test("room, private constraints, consent and booking survive a coordinator resta
   assert.equal(created.response.status, 201);
   const roomId = created.data.roomId;
   const cookies: Record<string, string> = { Alex: created.response.headers.get("set-cookie")!.split(";")[0]! };
+  const secured = await api.call("/auth/register", "POST", { displayName: "Alex", email: "alex@example.com", password: "correct horse battery staple" }, cookies.Alex);
+  assert.equal(secured.response.status, 201);
+  cookies.Alex = secured.response.headers.get("set-cookie")!.split(";")[0]!;
   for (const displayName of ["Priya", "Jordan", "Mateo"]) {
     const joined = await api.call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName });
     cookies[displayName] = joined.response.headers.get("set-cookie")!.split(";")[0]!;
   }
-  await api.call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName: "Ghost" });
+  const ghostJoin = await api.call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName: "Ghost" });
+  const ghostCookie = ghostJoin.response.headers.get("set-cookie")!.split(";")[0]!;
   const ghost = (await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data.members.find((m: any) => m.displayName === "Ghost");
   assert.equal((await api.call(`/rooms/${roomId}/members/${ghost.id}`, "DELETE", undefined, cookies.Alex)).response.status, 200);
   assert.equal(await raw.db(dbName).collection("members").countDocuments({ _id: ghost.id } as any), 0);
-  assert.equal(await raw.db(dbName).collection("sessions").countDocuments({ memberId: ghost.id }), 0);
+  assert.equal((await api.call(`/rooms/${roomId}`, "GET", undefined, ghostCookie)).response.status, 403);
   for (const [displayName, cookie] of Object.entries(cookies)) {
     const confirmed = await api.call(`/rooms/${roomId}/me/constraints`, "POST", {
       maxContributionCents: displayName === "Alex" ? 35000 : 45000, requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "lowest reasonable price", confirmed: true }, cookie);
@@ -67,13 +71,24 @@ test("room, private constraints, consent and booking survive a coordinator resta
   await api.stop();
   api = await boot(); // Simulated coordinator restart: all state must come back from Mongo.
 
+  const loggedIn = await api.call("/auth/login", "POST", { email: "alex@example.com", password: "correct horse battery staple" });
+  assert.equal(loggedIn.response.status, 200);
+  cookies.Alex = loggedIn.response.headers.get("set-cookie")!.split(";")[0]!;
+  const userDoc = await raw.db(dbName).collection("users").findOne({ email: "alex@example.com" });
+  assert.ok(userDoc?.passwordHash);
+  assert.ok(!JSON.stringify(userDoc).includes("correct horse battery staple"));
+
   const room = await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Priya);
   assert.equal(room.response.status, 200);
   assert.equal(room.data.readyMemberCount, 4);
   const mine = await api.call(`/rooms/${roomId}/me/constraints`, "GET", undefined, cookies.Alex);
   assert.equal(mine.data.constraints.maxContributionCents, 35000);
+  const account = await api.call("/me", "GET", undefined, cookies.Alex);
+  assert.equal(account.data.user.displayName, "Alex");
+  assert.equal(account.data.groups.some((group: any) => group.roomId === roomId), true);
   const restored = await api.call(`/proposals/${proposal.proposalId}/public`, "GET", undefined, cookies.Alex);
-  assert.equal(restored.data.proposal.authorization.authorizedCount, 4);
+  assert.equal(restored.data.proposal.authorization.status, "AUTHORIZED");
+  assert.equal(restored.data.proposal.authorization.transactionCount, 1);
   assert.equal(restored.data.canExecute, true);
   const unrelated = await api.call("/merchant/events", "POST", { offerId: "tampa-river-court", expectedOfferVersion: "v1", mutation: { type: "INCREASE_PRICE", newTotalCents: 130000 } }, cookies.Alex);
   assert.equal(unrelated.data.offerVersion, "v2");
@@ -87,6 +102,9 @@ test("room, private constraints, consent and booking survive a coordinator resta
   api = await boot();
   const receipt = await api.call(`/rooms/${roomId}/receipt`, "GET", undefined, cookies.Jordan);
   assert.equal(receipt.data.bookingReference, booked.data.bookingReference);
+  const history = await api.call("/me", "GET", undefined, cookies.Jordan);
+  assert.equal(history.data.groups.find((group: any) => group.roomId === roomId).booking.reference, booked.data.bookingReference);
+  assert.deepEqual(history.data.payments.filter((item: any) => item.proposalId === proposal.proposalId).map((item: any) => item.status), ["CAPTURED", "AUTHORIZED", "COMMITTED"]);
   assert.equal(await raw.db(dbName).collection("merchant_bookings").countDocuments(), 1);
   await api.stop();
 });

@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, Check, CheckCheck, CircleHelp, ExternalLink, LockKeyhole, MapPin, ShieldCheck, Users, X } from 'lucide-react';
 import type { EventDTO, PublicOfferDTO, PublicProposalDTO, PublicChange } from './contracts';
-import { date, dateTime, money, safeExplorer } from './api';
+import { calendarDate, date, dateTime, money, safeExplorer } from './api';
 
 export function Brand() { return <Link to="/" className="brand" aria-label="Accord home"><span className="brand-mark" aria-hidden="true">a</span>accord<span className="brand-dot">®</span></Link>; }
 export function Button({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) { return <button {...props} className={`button ${props.className || ''}`}>{children}</button>; }
@@ -11,7 +11,8 @@ export function Tag({ children, tone = '' }: { children: ReactNode; tone?: strin
 export function PrivateNote() { return <div className="private-note"><LockKeyhole size={17} /><span>Your budget and personal requirements stay private from the rest of the group.</span></div>; }
 export function ErrorNotice({ error, retry }: { error?: Error; retry?: () => void }) {
   if (!error) return null;
-  return <div className="notice error" role="alert"><CircleHelp size={20} /><div><strong>Let’s pause here</strong><p>{error.message}</p>{retry && <button className="text-button" onClick={retry}>Try again <ArrowRight size={14} /></button>}</div></div>;
+  const reference = 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+  return <div className="notice error" role="alert"><CircleHelp size={20} /><div><strong>Accord couldn’t continue</strong><p>{error.message}</p>{reference && <small>Error reference: {reference}</small>}{retry && <button className="text-button" onClick={retry}>Try again <ArrowRight size={14} /></button>}</div></div>;
 }
 export function Loading() { return <div className="loading" role="status"><span className="loader" /> Bringing everything together…</div>; }
 export function PageHeading({ eyebrow, title, description, aside }: { eyebrow: string; title: string; description?: string; aside?: ReactNode }) {
@@ -23,7 +24,7 @@ export function StayArt({ city, large = false }: { city: string; large?: boolean
   return <div className={`stay-art ${large ? 'large' : ''} ${city.toLowerCase().includes('tampa') ? 'courtyard' : ''}`} role="img" aria-label="Illustrated coastal accommodation; not a property photograph"><span className="art-sun" /><span className="art-building"><i /><i /><i /></span><span className="art-pool" /><span className="art-plant plant-one" /><span className="art-plant plant-two" /><span className="art-caption">A little room to come together.</span><span className="art-label">Illustration</span></div>;
 }
 export function OfferFacts({ offer }: { offer: PublicOfferDTO }) {
-  return <dl className="offer-facts"><div><dt>Stay</dt><dd>{date(offer.checkInAt)} – {date(offer.checkOutAt)}</dd></div><div><dt>Room</dt><dd>{offer.roomType}</dd></div><div><dt>Capacity</dt><dd>{offer.guestCapacity} guests</dd></div><div><dt>Cancellation</dt><dd>{offer.cancellationLabel}</dd></div><div><dt>Accessibility evidence</dt><dd>{offer.stepFreeVerified === null ? 'Step-free access unverified' : offer.stepFreeVerified ? 'Verified step-free access' : 'Not verified step-free'}</dd></div><div><dt>Checkout</dt><dd>{dateTime(offer.checkOutAt)}</dd></div></dl>;
+  return <dl className="offer-facts"><div><dt>Stay</dt><dd>{calendarDate(offer.checkInDate)} – {calendarDate(offer.checkOutDate)}</dd></div><div><dt>Room</dt><dd>{offer.roomType}</dd></div><div><dt>Capacity</dt><dd>{offer.guestCapacity} guests</dd></div><div><dt>Cancellation</dt><dd>{offer.cancellationLabel}</dd></div><div><dt>Accessibility evidence</dt><dd>{offer.stepFreeVerified === null ? 'Step-free access unverified' : offer.stepFreeVerified ? 'Verified step-free access' : 'Not verified step-free'}</dd></div><div><dt>Check-in</dt><dd>{offer.checkInTimeKnown ? dateTime(offer.checkInAt) : 'Time not provided by hotel'}</dd></div><div><dt>Checkout</dt><dd>{offer.checkOutTimeKnown ? dateTime(offer.checkOutAt) : 'Time not provided by hotel'}</dd></div></dl>;
 }
 export function Stability({ offer }: { offer: PublicOfferDTO }) {
   if (!offer.stability) return null;
@@ -39,8 +40,10 @@ export function OfferCard({ offer, recommended = false, children }: { offer: Pub
 }
 export function Funding({ proposal }: { proposal: PublicProposalDTO }) {
   const a = proposal.authorization;
+  const approval = proposal.approval;
   const invalidated = proposal.state === 'STALE' || proposal.state === 'CANCELLED';
-  return <section className="panel funding"><div className="section-heading"><h3>One shared agreement</h3><ShieldCheck size={21} /></div>{invalidated ? <p>Previous authorizations cannot be used. Fresh consent is required for a new proposal.</p> : <><div className="funding-count"><strong>{a.authorizedCount}<span> / {a.requiredCount}</span></strong><span>authorizations complete</span></div><progress aria-label="Member authorizations" max={Math.max(1, a.requiredCount)} value={a.authorizedCount} /><div className="between subtle"><span>{money(a.authorizedTotalCents)} authorized</span><span>{money(a.requiredTotalCents)} total</span></div><p className="fine">Everyone approves their exact share of this exact proposal.</p></>}</section>;
+  const paymentLabel = a.status === 'PENDING' ? 'Shared payment waits for every approval' : a.status === 'AUTHORIZED' ? 'Shared Visa authorization ready' : a.status === 'CAPTURED' ? 'Shared Visa payment captured' : a.status === 'RELEASED' ? 'Shared Visa authorization reversed' : 'Shared Visa payment needs review';
+  return <section className="panel funding"><div className="section-heading"><h3>One shared agreement</h3><ShieldCheck size={21} /></div>{invalidated ? <p>Previous approvals cannot be used. Fresh consent is required for a new proposal.</p> : <><div className="funding-count"><strong>{approval.approvedCount}<span> / {approval.requiredCount}</span></strong><span>contributions approved</span></div><progress aria-label="Member approvals" max={Math.max(1, approval.requiredCount)} value={approval.approvedCount} /><div className="between subtle"><span>{paymentLabel}</span><span>{money(a.authorizedTotalCents)} authorized</span></div><p className="fine">Each person approves an exact contribution. Once everyone agrees, Accord verifies the hotel, creates one shared Visa sandbox authorization for the group total, reserves the room, and captures that one payment.</p></>}</section>;
 }
 export function Integrity({ proposal, previousHash, currentHash }: { proposal: PublicProposalDTO; previousHash?: string; currentHash?: string }) {
   const link = proposal.solana?.status === 'CONFIRMED' && proposal.solana.transactionSignature ? safeExplorer(proposal.solana.explorerUrl) : undefined;
