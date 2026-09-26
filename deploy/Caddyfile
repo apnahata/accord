@@ -1,0 +1,5 @@
+{$ACCORD_DOMAIN} {
+  reverse_proxy accord:3000 {
+    flush_interval -1
+  }
+}

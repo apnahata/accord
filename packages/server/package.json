@@ -1,0 +1,7 @@
+{
+  "name": "@accord/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@accord/domain": "*", "@accord/integrations": "*", "zod": "^4.1.11", "mongodb": "^6.20.0" }
+}
