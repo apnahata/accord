@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowRight, Check, CheckCheck, CircleHelp, ExternalLink, LockKeyhole, MapPin, ShieldCheck, Sparkles, Users, X } from 'lucide-react';
 import type { EventDTO, PublicOfferDTO, PublicProposalDTO, PublicChange } from './contracts';
 import { date, dateTime, money, safeExplorer } from './api';
+import { Sparkline } from './charts';
 
 export function Brand() { return <Link to="/" className="brand" aria-label="Accord home"><span className="brand-mark" aria-hidden="true">a</span>accord<span className="brand-dot">®</span></Link>; }
 export function Button({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) { return <button {...props} className={`button ${props.className || ''}`}>{children}</button>; }
@@ -26,8 +27,16 @@ export function OfferFacts({ offer }: { offer: PublicOfferDTO }) {
   return <dl className="offer-facts"><div><dt>Stay</dt><dd>{date(offer.checkInAt)} – {date(offer.checkOutAt)}</dd></div><div><dt>Room</dt><dd>{offer.roomType}</dd></div><div><dt>Capacity</dt><dd>{offer.guestCapacity} guests</dd></div><div><dt>Cancellation</dt><dd>{offer.cancellationLabel}</dd></div><div><dt>Accessibility evidence</dt><dd>{offer.stepFreeVerified === null ? 'Step-free access unverified' : offer.stepFreeVerified ? 'Verified step-free access' : 'Not verified step-free'}</dd></div><div><dt>Checkout</dt><dd>{dateTime(offer.checkOutAt)}</dd></div></dl>;
 }
 export function Stability({ offer }: { offer: PublicOfferDTO }) {
-  if (!offer.stability) return null;
-  return <div className="stability" title="Observed stability during this Accord planning session. Not a prediction of future prices."><span className="stability-bars" aria-hidden="true">▂▄▃▅</span><span>{offer.stability.label.toLowerCase()} · {offer.stability.materialChangeCount} material changes <small>{offer.stability.observationCount} observations this session</small></span></div>;
+  const stability = offer.stability;
+  if (!stability) return null;
+  const changes = stability.materialChangeCount;
+  const history = (stability.history ?? []).map(point => ({ at: point.at, value: point.totalCents }));
+  if (stability.observationCount < 2) return <div className="stability" title="Accord records every price it sees in Tiger Data."><span><strong>Price tracking started</strong><small>Accord re-checks prices over time; stability appears after the next check.</small></span></div>;
+  return <div className={`stability ${stability.label.toLowerCase()}`} title="Observed by Accord over the last 24 hours (Tiger Data). Not a prediction of future prices.">
+    <span><strong>{stability.label === 'STABLE' ? 'Stable price' : stability.label === 'MIXED' ? 'Price moved' : 'Volatile price'}</strong> · {changes === 0 ? 'no changes' : `${changes} change${changes === 1 ? '' : 's'}`}{stability.minCents !== undefined && stability.maxCents !== undefined && stability.minCents !== stability.maxCents ? ` · ${money(stability.minCents)}–${money(stability.maxCents)}` : ''}
+      <small>{stability.observationCount} price checks in the last 24h{stability.label === 'VOLATILE' ? ' · approve soon or expect a re-check' : ''}</small></span>
+    <Sparkline points={history} format={money} />
+  </div>;
 }
 export function Research({ offer }: { offer: PublicOfferDTO }) {
   const research = offer.research;

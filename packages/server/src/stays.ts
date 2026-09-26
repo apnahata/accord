@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { OfferSchema, type Offer, type Trip } from "@accord/domain";
+import type { PriceObservation } from "./pulse.js";
 
 /** Live stay providers. Everything here maps provider data into the domain Offer; feasibility stays in @accord/domain. */
 export type Fetch = typeof fetch;
+/** Receives every public price a provider returned (all rates, not only the ones Accord keeps). */
+export type Observe = (rows: PriceObservation[]) => void;
+const liteOfferId = (hotelId: string, roomName: string, tag: string) => `lite-${hotelId}-${createHash("sha256").update(`${roomName}|${tag}`).digest("hex").slice(0, 12)}`;
 export type StayResearch = { sourceLabel: string; pros: string[]; cons: string[]; nearby: string[]; summary?: string };
 export type LiveStay = { offer: Offer; research: StayResearch; ref: LiteRef | ExternalRef };
 export type LiteRef = { provider: "LITEAPI"; hotelId: string; offerId: string; roomName: string; refundableTag: string };
@@ -64,7 +68,7 @@ function liteRateSummary(roomType: LiteRoomType) {
 }
 
 export class LiteApi {
-  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch) {
+  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch, private readonly observe?: Observe) {
     // This checkout has simulated member payments and a sandbox-only booking
     // flow. ACC_CREDIT_CARD would charge the account card with a production key.
     if (!/^(?:sand|sandbox)_/.test(key)) throw new Error("LITEAPI_SANDBOX_KEY_REQUIRED");
@@ -87,6 +91,7 @@ export class LiteApi {
     const rates = await this.rates(trip, {});
     const hotelsById = new Map((rates.hotels ?? []).map(hotel => [hotel.id, hotel]));
     const candidates = (rates.data ?? []).slice(0, 15);
+    this.#record(trip, rates, "search");
     const details = await pool(candidates, 4, hotel => this.hotel(hotel.hotelId).catch(() => undefined));
     const stays: LiveStay[] = [];
     candidates.forEach((hotel, index) => {
@@ -104,8 +109,22 @@ export class LiteApi {
   /** Current price and terms for the exact room/rate the group approved. */
   async requote(trip: Trip, ref: LiteRef) {
     const rates = await this.rates(trip, { hotelIds: [ref.hotelId] });
+    this.#record(trip, rates, "recheck");
     const summaries = (rates.data?.[0]?.roomTypes ?? []).map(liteRateSummary).filter(Boolean) as Array<NonNullable<ReturnType<typeof liteRateSummary>>>;
     return summaries.filter(item => item.roomName === ref.roomName && item.refundableTag === ref.refundableTag).sort((a, b) => a.totalCents - b.totalCents)[0];
+  }
+
+  #record(trip: Trip, rates: Awaited<ReturnType<LiteApi["rates"]>>, source: PriceObservation["source"]) {
+    if (!this.observe) return;
+    const names = new Map((rates.hotels ?? []).map(hotel => [hotel.id, hotel.name]));
+    const rows: PriceObservation[] = [];
+    for (const hotel of rates.data ?? []) for (const roomType of hotel.roomTypes ?? []) {
+      const rate = liteRateSummary(roomType);
+      if (!rate || rate.maxOccupancy < trip.guests) continue;
+      rows.push({ offerId: liteOfferId(hotel.hotelId, rate.roomName, rate.refundableTag), provider: "LITEAPI", propertyName: names.get(hotel.hotelId) ?? hotel.hotelId,
+        trip, totalCents: rate.totalCents, refundable: rate.refundableTag === "RFN", source });
+    }
+    try { this.observe(rows); } catch { /* telemetry is best-effort */ }
   }
 
   async prebook(offerId: string) {
@@ -142,7 +161,7 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
   const roomType = rate.board && !/room only/i.test(rate.board) ? `${rate.roomName} · ${rate.board}` : rate.roomName;
   try {
     const offer = OfferSchema.parse({
-      offerId: `lite-${hotelId}-${shortHash(`${rate.roomName}|${rate.refundableTag}`)}`, offerVersion: "v1",
+      offerId: liteOfferId(hotelId, rate.roomName, rate.refundableTag), offerVersion: "v1",
       merchantId: "liteapi", merchantName: "LiteAPI hotel inventory (sandbox)", propertyId: hotelId, propertyName: name,
       city: String(detail?.city ?? trip.destination), roomType,
       checkInAt: localToInstant(trip.checkIn, checkIn, trip.timeZone), checkOutAt: localToInstant(trip.checkOut, checkOut, trip.timeZone),
@@ -170,13 +189,16 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
 export class GoogleHotels {
-  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch) {}
+  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch, private readonly observe?: Observe) {}
 
   async search(trip: Trip, now = new Date()): Promise<LiveStay[]> {
     const params = new URLSearchParams({ engine: "google_hotels", q: `${trip.destination} vacation rentals`, vacation_rentals: "true",
       check_in_date: trip.checkIn, check_out_date: trip.checkOut, adults: String(trip.guests), currency: "USD", gl: trip.countryCode.toLowerCase(), hl: "en", api_key: this.key });
     const body = await getJson(this.fetcher, `https://serpapi.com/search.json?${params}`, {}, 30_000);
-    return (body.properties ?? []).slice(0, 20).map((property: any) => mapGoogle(trip, property, now)).filter(Boolean) as LiveStay[];
+    const stays = (body.properties ?? []).slice(0, 20).map((property: any) => mapGoogle(trip, property, now)).filter(Boolean) as LiveStay[];
+    try { this.observe?.(stays.map(stay => ({ offerId: stay.offer.offerId, provider: "GOOGLE_HOTELS", propertyName: stay.offer.propertyName, trip,
+      totalCents: stay.offer.totalCents, refundable: stay.offer.cancellationPolicyCode === "FULL_CASH_REFUND", source: "search" }))); } catch { /* best-effort */ }
+    return stays;
   }
 }
 

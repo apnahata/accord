@@ -12,6 +12,7 @@ import { Merchant, type MerchantContract } from "../../integrations/src/merchant
 import { RoomStreams } from "../../integrations/src/realtime.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
 import type { ExternalRef, GoogleHotels, LiteApi, LiteRef, LiveStay, ProviderResult, StayResearch } from "./stays.js";
+import type { Pulse } from "./pulse.js";
 import { SESSION_TTL_SECONDS, type MongoPersistence, type RoomAggregate, type SealedValue, type SessionRecord } from "./persistence.js";
 import { AppError } from "./errors.js";
 import { Coordinator, type AlternativesInput, type AutopilotOptions } from "./coordinator.js";
@@ -47,6 +48,8 @@ type LiveSearch = {
 type Booking = { reference: string; confirmedAt: string; proposalId: string; mode?: "SIMULATED" | "SANDBOX" | "EXTERNAL"; externalUrl?: string; hotelConfirmationCode?: string };
 export type StayProviders = {
   liteApi?: LiteApi; google?: GoogleHotels; summarize?: (facts: unknown) => Promise<string | undefined>;
+  /** Tiger Data market/process telemetry. Public prices and anonymous event types only. */
+  pulse?: Pulse;
   /** Advisory only: proposes nearby destinations to search. Accord's checks still decide feasibility. */
   suggestAlternatives?: (input: AlternativesInput) => Promise<string[] | undefined>;
 };
@@ -368,8 +371,14 @@ export class AccordState {
       ...(recommended.rating !== undefined ? [`Guest rating ${recommended.rating}/10${recommended.reviewCount ? ` from ${recommended.reviewCount.toLocaleString("en-US")} reviews` : ""}.`] : []),
       "Matches confirmed group preferences.",
     ];
+    // Observed price history from Tiger Data; optional and time-boxed so the page never waits on analytics.
+    const pulse = this.providers.pulse;
+    const stability = live && pulse ? await Promise.race([
+      pulse.stability(room.trip!, ordered.map(item => item.offer.offerId)).catch(() => undefined),
+      new Promise<undefined>(resolve => setTimeout(resolve, 1500)),
+    ]) : undefined;
     return { inventoryLabel: live ? `Live results: LiteAPI hotels (sandbox booking) and Google Hotels vacation rentals via SerpApi${room.search ? ` · searched ${new Date(room.search.searchedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: room.trip!.timeZone })}` : " · not searched yet"}` : inventoryLabel,
-      offers: ordered.map(item => this.offerDTO(item.offer, room, item.assessed.feasible)),
+      offers: ordered.map(item => { const dto = this.offerDTO(item.offer, room, item.assessed.feasible), observed = stability?.get(item.offer.offerId); return observed ? { ...dto, stability: observed } : dto; }),
       recommendedOfferId: recommended?.offerId, recommendationReasons: reasons,
       funnel: [{ label: live ? "Live stays checked" : "Demo stays checked", count: offers.length }, { label: "Current and available", count: offers.filter(offer => offer.available).length }, { label: "Suitable for everyone", count: feasible.length }] };
   }
@@ -472,6 +481,7 @@ export class AccordState {
     this.emit(room, "PAYMENT_AUTHORIZED", `${proposal.authorizations.size}/${room.memberIds.length} simulated contributions authorized.`, proposal.id);
     if (proposal.snapshot.memberIds.every(id => proposal.authorizations.get(id)?.status === "AUTHORIZED" && proposal.approvals.get(id)?.status === "APPROVED")) {
       proposal.state = "READY_TO_EXECUTE";
+      this.providers.pulse?.event({ type: "PROPOSAL_READY", roomId: room.id, proposalId: proposal.id, metadata: { memberCount: proposal.snapshot.memberIds.length } });
       this.autopilot.onAllAuthorized(room, proposal);
     }
     return { proposalId: proposal.id, version: proposal.version, proposalHash: proposal.hash, approvalStatus: "APPROVED" as const, paymentAuthorizationStatus: "AUTHORIZED" as const, amountCents: input.amountCents };
@@ -557,8 +567,14 @@ export class AccordState {
       const liteApi = this.providers.liteApi, ref = proposal.providerRef;
       if (!liteApi || !room.trip || ref?.provider !== "LITEAPI") return;
       let quote;
+      const started = performance.now();
       try { quote = await liteApi.requote(room.trip, ref); } catch { return; }
-      if (!active() || await this.#staleOnQuoteChange(room, offer, ref, quote, "while the group was deciding")) return;
+      if (!active()) return;
+      if (await this.#staleOnQuoteChange(room, offer, ref, quote, "while the group was deciding")) {
+        // Time from starting the live price check to invalidating everyone's approval.
+        this.providers.pulse?.event({ type: "STALE_DETECTED", roomId: room.id, proposalId: proposal.id, offerId: offer.offerId, latencyMs: performance.now() - started });
+        return;
+      }
     } else {
       const current = await this.currentOffer(offer.offerId);
       if (!active()) return;
@@ -643,6 +659,7 @@ export class AccordState {
     const event: EventDTO = { id: randomUUID(), occurredAt: nowIso(), title, ...(extra.detail ? { detail: extra.detail } : {}), ...(extra.actor ? { actor: extra.actor } : {}) };
     room.events.push(event); this.#dirtyRooms.add(room.id);
     this.streams.publishPublic(room.id, event.id, { roomId: room.id, type, proposalId, at: event.occurredAt });
+    this.providers.pulse?.event({ type, roomId: room.id, ...(proposalId ? { proposalId } : {}) });
   }
   #addSession(id: string, roomId: string, memberId: string) {
     this.sessions.set(id, { roomId, memberId, createdAt: nowIso() }); this.#dirtySessions.add(id);
