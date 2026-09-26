@@ -44,3 +44,6 @@
 .member-name .member-state{flex-basis:100%}
 .member-list .member-remove{margin:0 0 0 auto;color:#9a4a2f}
 .members-panel .fine{margin:14px 0 0}
+.intake-note{margin:18px 0}
+.intake-note ul{margin:6px 0;padding-left:18px;font-size:13px}
+.intake-note p{margin:4px 0 0;font-size:13px}

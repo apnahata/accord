@@ -68,3 +68,32 @@ test("private multi-turn AI intake asks a functional question and never saves be
   assert.equal(confirmed.data.constraints.maxContributionCents, 35000);
   assert.ok(!JSON.stringify((await call(roomPath, "GET", undefined, cookie)).data).includes("35000"));
 });
+
+test("questions about unmentioned fields and uncheckable requirements do not block the draft", async t => {
+  const app = createApi({
+    geminiApiKey: "test-only",
+    geminiModel: "test-model",
+    geminiFetch: async () => modelResponse({
+      proposed: { maxContributionCents: 40000, requiresFullCashRefund: true },
+      privacy: { reasonPrivate: false },
+      unsupportedHardRequirements: [{ rawText: "No red-eye flights", reason: "Flights are not part of a stay." }],
+      ambiguities: [{ field: "latestCheckOutAt", question: "What is the latest checkout time you need?" }],
+    }),
+  });
+  app.server.listen(0, "127.0.0.1");
+  await once(app.server, "listening");
+  t.after(async () => { app.state.streams.close(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); });
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
+  const created = await fetch(base + "/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Trip", goal: "Stay", displayName: "Alex" }) });
+  const { roomId } = await created.json() as any;
+  const response = await fetch(`${base}/rooms/${roomId}/me/intake/extract`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: created.headers.get("set-cookie")!.split(";")[0]! },
+    body: JSON.stringify({ messages: [{ role: "user", content: "I can pay at most $400, I need a full refund, and no red-eye flights." }] }),
+  });
+  const data = await response.json() as any;
+  assert.equal(data.stage, "REVIEW");
+  assert.equal(data.constraints.maxContributionCents, 40000);
+  assert.equal(data.constraints.requiresFullCashRefund, true);
+  assert.deepEqual(data.followUps, ["What is the latest checkout time you need?"]);
+  assert.deepEqual(data.notChecked, ["No red-eye flights"]);
+});
