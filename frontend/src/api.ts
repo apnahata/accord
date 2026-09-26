@@ -10,6 +10,23 @@ const errorCopy: Record<number, string> = {
   422: 'Please check your details and try again.',
   429: 'Please wait a moment before trying again.',
 };
+// Specific codes take precedence: many unrelated conditions share HTTP 409.
+const codeCopy: Record<string, string> = {
+  MEMBERS_NOT_READY: 'Not everyone has confirmed their requirements yet. Accord can search once every member is ready.',
+  NO_FEASIBLE_OFFER: 'No current stay meets every confirmed requirement.',
+  ROOM_FULL: 'This group is already full.',
+  NOT_READY_TO_BOOK: 'Every member must approve and authorize their share before booking.',
+  OWN_CONSTRAINT_FAILED: 'This proposal doesn’t meet one of your own requirements, so it can’t be approved from your account.',
+  CONSTRAINTS_REQUIRED: 'Confirm your requirements in your private space first.',
+  OFFER_VERSION_MISMATCH: 'This offer changed since you loaded it. Refresh to see the latest version.',
+  MERCHANT_BOOKING_FAILED: 'The demo merchant couldn’t complete the booking. No payment or booking success has been confirmed.',
+  PERSISTENCE_UNAVAILABLE: 'Accord couldn’t save this change. Please try again. No success has been confirmed.',
+  MEMBER_ALREADY_READY: 'This member has already confirmed their requirements, so they can’t be removed.',
+  CANNOT_REMOVE_HOST: 'The host can’t be removed from the group.',
+  MEMBER_NOT_FOUND: 'This member is no longer in the group.',
+  ADMIN_ACCESS_DENIED: 'Only the group host can do that.',
+  AI_UNAVAILABLE:'The assistant is unavailable right now. You can still enter your requirements with the form.',
+};
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
   try {
@@ -22,7 +39,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, typeof body.code === 'string' ? body.code : 'REQUEST_FAILED', errorCopy[response.status] || 'Accord couldn’t complete this request. No payment or booking success has been confirmed.');
+    const code = typeof body.code === 'string' ? body.code : 'REQUEST_FAILED';
+    throw new ApiError(response.status, code, codeCopy[code] || errorCopy[response.status] ||'Accord couldn’t complete this request. No payment or booking success has been confirmed.');
   }
   if (response.status === 204) return undefined as T;
   if (!response.headers.get('content-type')?.includes('application/json')) {

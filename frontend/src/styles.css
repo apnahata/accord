@@ -33,3 +33,14 @@
 .manual-intake{margin-bottom:23px}
 .manual-intake summary{cursor:pointer;color:var(--green);font-size:13px;font-weight:600;padding:16px 0}
 .manual-intake .form-panel{margin-top:8px}
+.member-list{list-style:none;margin:18px 0 0;padding:0}
+.member-list li{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.member-list li:first-child{border-top:0}
+.member-status{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:20px;height:20px;border:2px solid #c9cfbf;border-radius:50%;color:#fffefa}
+.member-status.ready{border-color:var(--green);background:var(--green)}
+.member-name{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 4px;min-width:0;font-size:14px}
+.member-name strong{font-weight:600;overflow-wrap:anywhere}
+.member-name small{color:var(--muted);font-size:12px}
+.member-name .member-state{flex-basis:100%}
+.member-list .member-remove{margin:0 0 0 auto;color:#9a4a2f}
+.members-panel .fine{margin:14px 0 0}

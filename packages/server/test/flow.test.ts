@@ -98,6 +98,38 @@ test("four private sessions recover from stale Miami consent and book Tampa once
   assert.equal(receipt.data.bookingReference, booked.data.bookingReference);
 });
 
+test("host sees members and can remove only members who have not confirmed", async t => {
+  const app = createApi();
+  app.server.listen(0, "127.0.0.1");
+  await once(app.server, "listening");
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
+  t.after(async () => { app.state.streams.close(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); });
+  const call = async (path: string, method = "GET", body?: unknown, cookie?: string) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(cookie ? { cookie } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { response, data: await response.json() as any };
+  };
+  const created = await call("/rooms", "POST", { name: "Trip", goal: "Stay", displayName: "Host" });
+  const roomId = created.data.roomId, host = created.response.headers.get("set-cookie")!.split(";")[0]!;
+  const join = async (displayName: string) => (await call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName })).response.headers.get("set-cookie")!.split(";")[0]!;
+  const ready = await join("Ready"), idle = await join("Idle");
+  assert.equal((await call(`/rooms/${roomId}/me/constraints`, "POST", { maxContributionCents: 35000, requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", confirmed: true }, ready)).response.status, 200);
+
+  const view = (await call(`/rooms/${roomId}`, "GET", undefined, host)).data;
+  assert.equal(view.viewerIsHost, true);
+  assert.deepEqual(view.members.map((m: any) => [m.displayName, m.ready, m.isHost, m.isYou]), [["Host", false, true, true], ["Ready", true, false, false], ["Idle", false, false, false]]);
+  assert.ok(!JSON.stringify(view).includes("35000"));
+  const id = (name: string) => view.members.find((m: any) => m.displayName === name).id;
+
+  assert.equal((await call(`/rooms/${roomId}/members/${id("Idle")}`, "DELETE", undefined, ready)).data.code, "ADMIN_ACCESS_DENIED");
+  assert.equal((await call(`/rooms/${roomId}/members/${id("Ready")}`, "DELETE", undefined, host)).data.code, "MEMBER_ALREADY_READY");
+  assert.equal((await call(`/rooms/${roomId}/members/${id("Host")}`, "DELETE", undefined, host)).data.code, "CANNOT_REMOVE_HOST");
+  const removed = await call(`/rooms/${roomId}/members/${id("Idle")}`, "DELETE", undefined, host);
+  assert.equal(removed.response.status, 200);
+  assert.deepEqual(removed.data.members.map((m: any) => m.displayName), ["Host", "Ready"]);
+  assert.equal(removed.data.memberCount, 2);
+  assert.equal((await call(`/rooms/${roomId}`, "GET", undefined, idle)).response.status, 401);
+});
+
 test("merchant mutations reject concurrent reuse of one expected offer version", async () => {
   const state = new AccordState();
   await state.ready;
