@@ -3,6 +3,6 @@ export type {
   Constraints, PublicRoomDTO, PublicOfferDTO, PublicProposalDTO,
   PrivateProposalDTO, ConsentResponseDTO, CapsuleDTO, Capabilities,
   MemoryDTO, EventDTO, PublicChange, ProposalEnvelope,
-  PrivateProposalEnvelope, OffersDTO, ReceiptDTO, MerchantDTO, AnalyticsDTO,
+  PrivateProposalEnvelope, OffersDTO, ReceiptDTO, MerchantDTO, AnalyticsDTO, PulseDTO,
   AutopilotDTO, InboxDTO, InboxMessageDTO,
 } from "@accord/domain";

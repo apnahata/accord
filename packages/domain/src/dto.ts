@@ -30,7 +30,9 @@ export type PublicOfferDTO = {
   bookingMode: 'SIMULATED' | 'SANDBOX' | 'EXTERNAL';
   imageUrl?: string; address?: string; rating?: number; reviewCount?: number; externalUrl?: string;
   research?: StayResearchDTO;
-  stability?: { observationCount: number; materialChangeCount: number; label: 'STABLE' | 'MIXED' | 'VOLATILE' };
+  /** Observed price stability for this exact trip (Tiger Data). history: 5-minute buckets, latest price per bucket. */
+  stability?: { observationCount: number; materialChangeCount: number; label: 'STABLE' | 'MIXED' | 'VOLATILE';
+    minCents?: number; maxCents?: number; history?: Array<{ at: string; totalCents: number }> };
 };
 export type PublicProposalDTO = {
   proposalId: string; version: number; proposalHash: string;
@@ -94,4 +96,13 @@ export type MerchantDTO = {
 };
 export type AnalyticsDTO = {
   source: 'TIGER'; points: Array<{ at: string; totalCents: number; label: string }>;
+};
+export type PulseDTO = {
+  source: 'TIGER'; queryMs: number; generatedAt: string;
+  totals: { observations: number; listings: number; destinations: number; firstObservedAt?: string; byProvider: Record<string, number> };
+  storage: { totalBytes: number; chunks: number; compressedChunks: number; beforeBytes: number; afterBytes: number; ratio?: number };
+  markets: Array<{ destination: string; points: Array<{ at: string; nightlyCents: number }> }>;
+  movers: Array<{ offerId: string; propertyName: string; destination: string; changes: number; minCents: number; maxCents: number; latestCents: number }>;
+  consensus: { proposals: number; ready: number; stale: number; booked: number; medianMinutesToReady?: number; medianSecondsStaleToReplan?: number; medianStaleDetectionMs?: number };
+  activity: Array<{ at: string; counts: Record<string, number> }>;
 };

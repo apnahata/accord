@@ -10,6 +10,8 @@ import { AccordState, AppError } from "./state.js";
 import type { AlternativesInput, AutopilotOptions } from "./coordinator.js";
 import { MongoPersistence } from "./persistence.js";
 import { GoogleHotels, LiteApi } from "./stays.js";
+import { Pulse } from "./pulse.js";
+import { createTigerPool } from "../../integrations/src/tiger.js";
 import { normalizeModelCheckout } from "./model-time.js";
 import { triageExtraction } from "./intake.js";
 import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
@@ -60,14 +62,18 @@ async function serveFrontend(path: string, response: ServerResponse) {
 }
 
 export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence;
-  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; autopilot?: AutopilotOptions } = {}) {
+  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; autopilot?: AutopilotOptions; tigerUrl?: string; pulse?: Pulse } = {}) {
   const persistence = options.persistence;
   const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
   const liteApiKey = options.liteApiKey ?? process.env.LITEAPI_KEY, serpApiKey = options.serpApiKey ?? process.env.SERPAPI_KEY;
+  const tigerUrl = options.tigerUrl ?? process.env.TIGER_DATABASE_URL;
+  const pulse = options.pulse ?? (tigerUrl ? new Pulse(createTigerPool(tigerUrl)) : undefined);
+  const observe = pulse ? pulse.observe.bind(pulse) : undefined;
   const providers = {
-    ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch) } : {}),
-    ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch) } : {}),
+    ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch, observe) } : {}),
+    ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch, observe) } : {}),
+    ...(pulse ? { pulse } : {}),
     ...(aiConfigured ? { summarize: async (facts: unknown) => {
       const result = await model.generate({ input: z.unknown(), output: z.object({ summary: z.string().max(400) }).strict() }, facts,
         "Write one or two plain sentences (max 45 words) telling a group of friends what this stay is like, using only the supplied public listing facts. No names of group members, no budgets, no invented facts, no marketing language.");
@@ -91,10 +97,10 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       const method = request.method ?? "GET";
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (method === "GET" && path === "/api/health") {
-        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "DOWN" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", tiger: "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
+        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "DOWN" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", tiger: pulse ? (await pulse.ping() ? "UP" : "DOWN") : "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
       }
       if (method === "GET" && path === "/api/capabilities") {
-        await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: false }, autopilot: { available: autopilot.enabled !== false }, liveSearch: { available: Boolean(liteApiKey || serpApiKey) } }); return;
+        await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: !!pulse }, autopilot: { available: autopilot.enabled !== false }, liveSearch: { available: Boolean(liteApiKey || serpApiKey) } }); return;
       }
       if (method === "POST" && path === "/api/rooms") {
         const input = z.object({ name, goal: z.string().trim().max(500).optional(), displayName: z.string().trim().min(1).max(60), trip: TripSchema.optional() }).strict().parse(await readJson(request));
@@ -257,7 +263,20 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         response.setHeader("set-cookie", "accord_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
         await send(200, { reset: true, sessionsInvalidated: true }); return;
       }
-      if (path === "/api/demo/analytics" && method === "GET") throw new AppError(503, "TIGER_UNAVAILABLE");
+      // Public, anonymous market + consensus dashboard served from Tiger Data.
+      if (path === "/api/pulse" && method === "GET") {
+        if (!pulse) throw new AppError(503, "TIGER_UNAVAILABLE");
+        try { await send(200, await pulse.dashboard()); } catch { throw new AppError(503, "TIGER_UNAVAILABLE"); }
+        return;
+      }
+      if (path === "/api/demo/analytics" && method === "GET") {
+        const session = sessionRequired(state, request); const { room } = state.requireHost(session.roomId, session);
+        const proposal = room.activeProposalId ? state.proposals.get(room.activeProposalId) : undefined;
+        if (!pulse || !room.trip || !proposal) throw new AppError(503, "TIGER_UNAVAILABLE");
+        let history;
+        try { history = await pulse.offerHistory(room.trip, proposal.snapshot.offer.offerId); } catch { throw new AppError(503, "TIGER_UNAVAILABLE"); }
+        await send(200, { source: "TIGER", points: history.map(point => ({ at: point.at, totalCents: point.totalCents, label: proposal.snapshot.offer.propertyName })) }); return;
+      }
       if (path === "/api/intake/transcribe" && method === "POST") throw new AppError(503, "ELEVENLABS_UNAVAILABLE");
       if (method === "GET" && !path.startsWith("/api/")) { await serveFrontend(path, response); return; }
       throw new AppError(404, "NOT_FOUND");
