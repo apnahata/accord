@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createApi } from "../src/server.js";
-import { localToInstant } from "../src/stays.js";
+import { LiteApi, localToInstant } from "../src/stays.js";
 
 // Provider responses are controlled here; the live APIs are exercised manually, not in CI.
 const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
@@ -23,17 +23,18 @@ function providers(options: { hotelStepFree?: boolean } = {}) {
       poi: [{ name: "Beach", distanceKm: 0.5, importance: "major" }], sentiment_analysis: { pros: ["Great location"], cons: ["Small rooms"], categories: [{ name: "Location", rating: 9.5 }] } } });
     if (url.includes("/rates/prebook")) return json({ data: { prebookId: "PB1", price: state.refundableCents / 100, currency: "USD", cancellationChanged: false } });
     if (url.includes("/rates/book")) { calls.book++; assert.equal(JSON.parse(String(init?.body)).payment.method, "ACC_CREDIT_CARD"); return json({ data: { bookingId: "BK1", status: "CONFIRMED", price: state.refundableCents / 100 } }); }
-    if (url.includes("serpapi.com")) { calls.serp++; return json({ properties: [{ type: "vacation rental", property_token: "tok1", name: "Beach House", link: "https://example.com/beach-house",
+    if (url.includes("serpapi.com")) { calls.serp++; const rental = { type: "vacation rental", property_token: "tok1", name: "Beach House", link: "https://example.com/beach-house",
       total_rate: { extracted_lowest: 1000 }, essential_info: ["Entire house", "Sleeps 6", "3 bedrooms"], check_in_time: "4:00 PM", check_out_time: "10:00 AM",
       prices: [{ source: "ExampleStays", free_cancellation: true, free_cancellation_until_date: monthDay(40), free_cancellation_until_time: "11:59 PM" }],
-      amenities: ["Wheelchair accessible", "Pool"], excluded_amenities: [], nearby_places: [{ name: "Pier", transportations: [{ type: "Walking", duration: "5 min" }] }], overall_rating: 4.8, reviews: 40 }] }); }
+      amenities: ["Wheelchair accessible", "Pool"], excluded_amenities: [], nearby_places: [{ name: "Pier", transportations: [{ type: "Walking", duration: "5 min" }] }], overall_rating: 4.8, reviews: 40 };
+      return json({ properties: [rental, { ...rental, property_token: "tok2", name: "Rental with no booking link", link: undefined }] }); }
     throw new Error(`Unexpected request ${url}`);
   }) as typeof fetch;
   return { fetcher, calls, state };
 }
 
 async function start(fetcher: typeof fetch) {
-  const app = createApi({ liteApiKey: "test", serpApiKey: "test", staysFetch: fetcher, geminiApiKey: "", geminiModel: "" });
+  const app = createApi({ liteApiKey: "sand_test", serpApiKey: "test", staysFetch: fetcher, geminiApiKey: "", geminiModel: "" });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
@@ -69,6 +70,13 @@ test("converts destination wall-clock times to instants", () => {
   assert.equal(localToInstant("2026-11-16", "11:00 AM", "America/New_York"), "2026-11-16T16:00:00.000Z");
   assert.equal(localToInstant("2026-07-16", "12:00 PM", "America/New_York"), "2026-07-16T16:00:00.000Z");
   assert.equal(localToInstant("2026-07-16", "12:00 AM", "America/New_York"), "2026-07-16T04:00:00.000Z");
+});
+
+test("LiteAPI production or unrecognized keys cannot enter the sandbox booking flow", () => {
+  assert.throws(() => new LiteApi("prod_example"), /LITEAPI_SANDBOX_KEY_REQUIRED/);
+  assert.throws(() => new LiteApi("unknown_example"), /LITEAPI_SANDBOX_KEY_REQUIRED/);
+  assert.doesNotThrow(() => new LiteApi("sand_example"));
+  assert.doesNotThrow(() => new LiteApi("sandbox_example"));
 });
 
 test("live search: real-provider offers are checked privately and booked through the LiteAPI sandbox", async t => {

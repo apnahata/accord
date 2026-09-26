@@ -1,6 +1,20 @@
 # Accord sponsor evidence ledger
 
-This ledger separates live provider proof from local synthetic tests, code paths, and deployment templates. A Gemini key is configured locally in a gitignored `.env`; other external services remain placeholders. No sponsor submission is marked complete.
+This ledger separates live provider proof from local synthetic tests, code paths, and deployment templates. Gemini, LiteAPI sandbox, and SerpApi keys are configured locally in a gitignored `.env`; other external services remain placeholders. No sponsor submission is marked complete.
+
+## Live stay providers (core product, not a sponsor claim)
+
+- **Credentials/account:** LiteAPI sandbox key and SerpApi key are configured locally; neither key is committed. Accord rejects LiteAPI production keys.
+- **Feature:** Real hotel-rate search and sandbox booking through LiteAPI; real Google Hotels vacation-rental search through SerpApi, with external checkout handoff only.
+- **Why Accord needs it:** Groups must compare actual dated stays and recheck the exact approved hotel rate before a sandbox booking.
+- **Implementation:** `packages/server/src/stays.ts` maps provider responses to `@accord/domain` offers. `packages/server/src/state.ts` runs the deterministic checks, takes four simulated member authorizations, requotes and prebooks the selected hotel, and books only through LiteAPI sandbox. Rentals without a public HTTPS handoff link are excluded.
+- **Code path:** `POST /api/rooms/:id/solve`, `GET /api/rooms/:id/offers`, `POST /api/proposals/:id/consent`, `POST /api/proposals/:id/execute`; reproducible verifier `tools/verify-live-stays.mjs`.
+- **Live proof:** On 2026-09-26, the local four-session Accord flow returned 28 LiteAPI hotel offers and 10 SerpApi rentals with handoff links for a Miami trip. Four synthetic members authorized their shares in Accord's simulated mode. LiteAPI returned sandbox booking `gdBAdCtbs`; a repeat Accord execute returned the same reference. A separate real LiteAPI `GET /bookings/{bookingId}` returned HTTP 200, `CONFIRMED`, `sandbox: 1`, USD 570.42, matching the approved offer. A separate four-member SerpApi-only flow returned `HANDOFF` and a real HTTPS listing link, without booking the rental. Sanitized proof is in `sponsor-evidence/live-stays-smoke.json`.
+- **Screenshot:** None; this was an API flow, not a four-browser UI rehearsal.
+- **Transaction/query/reference:** LiteAPI sandbox booking `gdBAdCtbs`; SerpApi search returned rental results. No production reservation or payment authorization occurred.
+- **Failure behavior:** Provider failures return an error or reuse the last successful search; they do not produce a booking. Missing rental handoff links are filtered. A detected changed hotel rate or terms invalidates the proposal and requires fresh consent.
+- **Known limitations:** Member payment authorizations are simulated, no real room is reserved, no card is charged, and vacation rentals are not booked by Accord. The test used in-memory coordinator state and synthetic member identities; it did not prove Mongo, deployment, or browser behavior. Search counts depend on date and provider inventory. Real-world listing quality and cancellation/accessibility claims need broader review.
+- **Submission status:** Core provider API use and one sandbox booking verified locally; no sponsor category is claimed for them.
 
 ## Gemini / Google AI
 
