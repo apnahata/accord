@@ -142,7 +142,7 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
   const roomType = rate.board && !/room only/i.test(rate.board) ? `${rate.roomName} · ${rate.board}` : rate.roomName;
   try {
     const offer = OfferSchema.parse({
-      offerId: `lite-${hotelId}-${shortHash(`${rate.roomName}|${rate.refundableTag}`)}`, offerVersion: "v1",
+      offerId: `lite-${hotelId}-${shortHash(`${trip.checkIn}|${trip.checkOut}|${rate.roomName}|${rate.refundableTag}`)}`, offerVersion: "v1",
       merchantId: "liteapi", merchantName: "LiteAPI hotel inventory (sandbox)", propertyId: hotelId, propertyName: name,
       city: String(detail?.city ?? trip.destination), roomType,
       checkInAt: localToInstant(trip.checkIn, checkIn, trip.timeZone), checkOutAt: localToInstant(trip.checkOut, checkOut, trip.timeZone),
@@ -215,7 +215,7 @@ function mapGoogle(trip: Trip, property: any, now: Date): LiveStay | undefined {
   const essential = (property.essential_info ?? []) as string[];
   try {
     const offer = OfferSchema.parse({
-      offerId: `gh-${shortHash(property.property_token)}`, offerVersion: "v1",
+      offerId: `gh-${shortHash(`${property.property_token}|${trip.checkIn}|${trip.checkOut}`)}`, offerVersion: "v1",
       merchantId: "google-hotels", merchantName: price?.source ? String(price.source) : "Google Hotels listing",
       propertyId: shortHash(property.property_token), propertyName: String(property.name).slice(0, 160), city: trip.destination,
       roomType: essential.filter(item => !/^Sleeps/i.test(item)).slice(0, 3).join(" · ") || "Vacation rental",
