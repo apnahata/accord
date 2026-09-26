@@ -19,7 +19,7 @@ npm run dev:web
 
 Open the Vite URL shown in the terminal. It proxies `/api` to `http://localhost:3000`. Alternatively, run `npm run build` and open `http://localhost:3000`; the API serves the built frontend itself.
 
-Create a group as Alex, open the invite in three separate browser profiles, and join as Priya, Jordan and Mateo. Confirm the brief's private constraints. Solve to see the $1,200 Miami demo stay. All four members approve and authorize their **simulated** $300 shares. From Alex's authenticated merchant console, increase Miami to $1,440. The old consent becomes stale; Alex privately sees that the new $360 share exceeds his $350 cap. Replan to the $1,120 Tampa demo stay, get four fresh $280 authorizations, and book once. The receipt clearly says no card was charged and no real accommodation was reserved.
+Create a group as Alex, open the invite in three separate browser profiles, and join as Priya, Jordan and Mateo. The private intake is conversation-first when Gemini is configured: Accord asks a functional clarification, then shows an unconfirmed draft for review. Without a verified model connection, it says AI is unavailable and opens manual entry. Confirm the brief's private constraints. Solve to see the $1,200 Miami demo stay. All four members approve and authorize their **simulated** $300 shares. From Alex's authenticated merchant console, increase Miami to $1,440. The old consent becomes stale; Alex privately sees that the new $360 share exceeds his $350 cap. Replan to the $1,120 Tampa demo stay, get four fresh $280 authorizations, and book once. The receipt clearly says no card was charged and no real accommodation was reserved.
 
 ## MongoDB persistence
 
@@ -41,7 +41,9 @@ npm run test:core
 node --test tools/infra/test/*.test.mjs
 ```
 
-The core test exercises four separate authenticated HTTP sessions and the stale-to-booked flow. It does not prove four browser UIs or a deployed service. The infrastructure test exercises a synthetic localhost SSE server. Provider adapter tests use controlled responses, not live sponsor credentials.
+The core tests exercise four separate authenticated HTTP sessions, the stale-to-booked flow, and a multi-turn intake with a fake model response. They do not prove four browser UIs, a live model, or a deployed service. The infrastructure test exercises a synthetic localhost SSE server. Provider adapter tests use controlled responses, not live sponsor credentials.
+
+For a live Gemini intake smoke test, set `GEMINI_API_KEY` and `GEMINI_MODEL=gemini-3.5-flash-lite` in the gitignored root `.env`, then run `npm run verify:gemini -- --record`. It calls Gemini through the local Accord API with synthetic member text, checks the review draft and no-save-before-confirmation rule, and writes a sanitized result to `sponsor-evidence/gemini-live-smoke.json`. A provider error or incorrect draft makes the command fail.
 
 ## Ownership and limitations
 
@@ -50,4 +52,4 @@ The core test exercises four separate authenticated HTTP sessions and the stale-
 - `packages/integrations` contains provider and merchant transports. Optional sponsor services stay unavailable until configured and proven live.
 - `deploy` contains a Vultr-ready template, not an actual deployment. It requires a real integrated image, `MONGODB_URI`/`ACCORD_ENCRYPTION_KEY`, host and DNS before a production claim. Without Mongo configured the API reports `UNCONFIGURED` and deliberately fails the deployment readiness gate.
 
-Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. Gemini intake can be configured with `GEMINI_API_KEY` and `GEMINI_MODEL`, but no real call has been made here. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.
+Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. One live local Gemini intake call has been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.

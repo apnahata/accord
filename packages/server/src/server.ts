@@ -5,8 +5,10 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema } from "@accord/domain";
 import { Gemini } from "../../integrations/src/ai.js";
+import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 import { MongoPersistence } from "./persistence.js";
+import { normalizeModelCheckout } from "./model-time.js";
 
 const name = z.string().trim().min(1).max(100);
 const roomIdPattern = /^\/api\/rooms\/([^/]+)(?:\/(.*))?$/;
@@ -53,10 +55,10 @@ async function serveFrontend(path: string, response: ServerResponse) {
   } catch { throw new AppError(404, "FRONTEND_NOT_BUILT"); }
 }
 
-export function createApi(options: { geminiApiKey?: string; geminiModel?: string; persistence?: MongoPersistence } = {}) {
+export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence } = {}) {
   const persistence = options.persistence;
   let state = new AccordState(persistence);
-  const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL });
+  const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
   const server = createServer(async (request, response) => {
     // Nothing is acknowledged to a client until the changes it caused are durable.
@@ -106,24 +108,34 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           await send(200, { displayName: member.displayName, constraints: member.constraints, confirmedAt: member.confirmedAt }); return;
         }
         if (route === "me/intake/extract" && method === "POST") {
-          const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).strict().parse(await readJson(request));
+          const message = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(1000) }).strict();
+          const { messages } = z.object({ messages: z.array(message).min(1).max(24) }).strict().parse(await readJson(request));
+          if (messages.length % 2 !== 1 || messages.some((entry, index) => entry.role !== (index % 2 === 0 ? "user" : "assistant"))) throw new AppError(422, "INVALID_CONVERSATION");
           if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
-          const result = await model.generate({ input: z.object({ text: z.string(), tripDates: z.string() }).strict(), output: ExtractionSchema },
-            { text, tripDates: "March 10–14, 2027. Dates and times are in America/New_York." },
-            "Extract only supported functional constraints. Ask concise clarifying questions for ambiguity. Do not infer a private reason. This is a proposal for user review, never a confirmed constraint.");
+          const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), messages: z.array(message) }).strict(), output: ExtractionSchema },
+            { roomGoal: room.goal, timeZone: "America/New_York", messages },
+            "Read the full private stay conversation. Extract an EXPLICIT personal spending maximum into maxContributionCents: $350 means 35000 cents; never omit an explicit maximum and never invent a missing one. The supported hard fields are maximum contribution, latest checkout date/time, full cash refund, and verified step-free access. A stated checkout date/time belongs in latestCheckOutAt. A walkable/quiet/near-activities/low-price wish is a soft preference, not an unsupported hard requirement. Only list a hard requirement as unsupported when none of the supported fields can represent it. Ask one concise functional clarification only when a stated requirement is genuinely ambiguous. Resolve relative dates only from supplied dates; otherwise ask for the calendar date. Express latestCheckOutAt as the requested checkout WALL CLOCK in America/New_York with a numeric offset, for example 2027-03-14T12:00:00-04:00. NEVER return a Z/UTC timestamp; the backend will verify and normalize the Eastern offset. If the member gives another timezone, convert its wall time to equivalent Eastern wall time first. The latest member answer may revise earlier statements. Never infer a private reason. This is an unconfirmed draft, never permission to spend.");
           if (result.status !== "OK") throw new AppError(503, "AI_UNAVAILABLE");
           const extraction = result.value.data;
           if (extraction.unsupportedHardRequirements.length || extraction.ambiguities.length) {
-            await send(200, { needsClarification: extraction.ambiguities[0]?.question ?? "Please use the structured form for an unsupported hard requirement." }); return;
+            await send(200, { stage: "CLARIFYING", reply: extraction.ambiguities[0]?.question ?? "I can't verify one of those requirements for a stay yet. Can you describe the functional requirement another way?" }); return;
           }
-          if (extraction.proposed.maxContributionCents === undefined) { await send(200, { needsClarification: "What is your maximum personal contribution?" }); return; }
-          await send(200, { constraints: {
+          if (extraction.proposed.maxContributionCents === undefined) { await send(200, { stage: "CLARIFYING", reply: "What is the most you would personally contribute to this stay?" }); return; }
+          let latestCheckOutAt: string | undefined;
+          try {
+            latestCheckOutAt = extraction.proposed.latestCheckOutAt
+              ? normalizeModelCheckout(extraction.proposed.latestCheckOutAt) : undefined;
+          } catch {
+            await send(200, { stage: "CLARIFYING", reply: "Please confirm the exact checkout date and time in Eastern Time." }); return;
+          }
+          const constraints = ConstraintsSchema.parse({
             maxContributionCents: extraction.proposed.maxContributionCents,
-            latestCheckOutAt: extraction.proposed.latestCheckOutAt,
+            latestCheckOutAt,
             requiresFullCashRefund: extraction.proposed.requiresFullCashRefund ?? false,
             requiresStepFreeAccess: extraction.proposed.requiresStepFreeAccess ?? false,
             softPreference: extraction.proposed.softPreferences?.map(item => item.kind.toLowerCase().replaceAll("_", " ")).join(", ") ?? "",
-          }, requiresConfirmation: true }); return;
+          });
+          await send(200, { stage: "REVIEW", reply: "I have a draft for you to review. Nothing has been applied yet.", constraints, requiresConfirmation: true }); return;
         }
         if (route === "solve" && method === "POST") {
           await readJson(request);

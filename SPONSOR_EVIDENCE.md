@@ -1,22 +1,22 @@
 # Accord sponsor evidence ledger
 
-This ledger records verified proof only. A configured adapter, local synthetic test, code path, or deployment template is not live sponsor evidence. External credentials and services were explicitly left as placeholders. No sponsor submission is marked complete.
+This ledger separates live provider proof from local synthetic tests, code paths, and deployment templates. A Gemini key is configured locally in a gitignored `.env`; other external services remain placeholders. No sponsor submission is marked complete.
 
 ## Gemini / Google AI
 
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
-- **Credentials/account:** Not configured.
-- **Feature:** Guarded Gemini structured intake candidate; public/private model explanations are not wired.
+- **Credentials/account:** Gemini API key configured in the local gitignored `.env`; the key is not committed.
+- **Feature:** Private conversation-first intake route with structured clarification and a reviewable draft; public/private model explanations are not wired.
 - **Why Accord needs it:** Convert members' natural language into a reviewable proposal while keeping deterministic feasibility and consent in the backend.
-- **Implementation:** `packages/server/src/server.ts` uses `packages/integrations/src/ai.ts` and validates against `@accord/domain` extraction schema. The user must separately confirm via `/me/constraints`.
+- **Implementation:** `frontend/src/pages-intake.tsx` sends the member's conversation to `packages/server/src/server.ts`, which uses `packages/integrations/src/ai.ts` and validates against `@accord/domain` extraction schema. The server checks and normalizes the model's Eastern checkout time. The user must separately confirm via `/me/constraints`. The local multi-turn test uses a fake provider response; the separate smoke test calls live Gemini.
 - **Code path:** `POST /api/rooms/:id/me/intake/extract`.
-- **Live proof:** None.
+- **Live proof:** On 2026-09-26, `npm run verify:gemini -- --record` made a real Gemini API call through the local Accord intake route using a synthetic member statement. Gemini `gemini-3.5-flash-lite` returned a schema-valid REVIEW draft with a $350 cap, a walkable preference, and noon Eastern on 2027-03-14 normalized to `2027-03-14T16:00:00.000Z`. A read of the room confirmed no constraints were saved before user confirmation. The sanitized response is in `sponsor-evidence/gemini-live-smoke.json`.
 - **Screenshot:** None.
-- **Transaction/query/reference:** None.
+- **Transaction/query/reference:** Local smoke-test record `sponsor-evidence/gemini-live-smoke.json`; no provider request ID was exposed by this route.
 - **Failure behavior:** Returns `AI_UNAVAILABLE`; structured manual intake remains available.
-- **Known limitations:** No API key, completed real call, public/private model explanations or deployed UI verification.
-- **Submission status:** Not verified; do not claim use yet.
+- **Known limitations:** This proves one local live intake call, not reliability, deployed UI use, four-member use, or sponsor eligibility. The model can ask clarifying questions or omit fields on other runs. Gemini `gemini-3.8-flash` returned HTTP 503 for structured output during testing, so the local verified model is `gemini-3.5-flash-lite`. Public/private model explanations and persisted draft conversation are not wired.
+- **Submission status:** Live intake use verified locally; challenge eligibility and complete sponsor submission remain unverified.
 
 ## Tiger Data
 

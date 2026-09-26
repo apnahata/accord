@@ -4,7 +4,8 @@ import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-do
 import { LockKeyhole, ArrowUpRight } from 'lucide-react';
 import { Brand } from './components';
 import { Landing, NewRoom, JoinRoom, JoinEntry } from './pages-entry';
-import { Intake, Summary } from './pages-private';
+import { Summary } from './pages-private';
+import { Intake } from './pages-intake';
 import { Room, Offers, Proposal, Receipt, Merchant } from './pages-group';
 import './styles.css';
 
