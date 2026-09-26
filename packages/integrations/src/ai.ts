@@ -26,7 +26,6 @@ export class Gemini {
             generationConfig: {
               responseMimeType: "application/json",
               responseJsonSchema: z.toJSONSchema(task.output, { target: "draft-7" }),
-              temperature: 0.1,
             },
           }),
         });
