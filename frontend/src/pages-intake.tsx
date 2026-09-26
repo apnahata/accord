@@ -4,8 +4,9 @@ import { ArrowLeft, ArrowRight, Check, LockKeyhole, Sparkles } from 'lucide-reac
 import { Button, ErrorNotice, Loading, PageHeading, PrivateNote, Tag } from './components';
 import { post, segment } from './api';
 import { useAction, useResource } from './hooks';
-import type { Capabilities, CapsuleDTO, Constraints } from './contracts';
+import type { Capabilities, CapsuleDTO, Constraints, PublicRoomDTO } from './contracts';
 import { BoundaryList, Voice } from './pages-private';
+import { readTripAnswers, TripAnswerFields, TripAnswerList } from './planning';
 
 type ConversationMessage = { role: 'user' | 'assistant'; content: string };
 type IntakeReply = {
@@ -27,6 +28,8 @@ export function Intake() {
   const path = '/rooms/' + segment(roomId);
   const capsule = useResource<CapsuleDTO>(path + '/me/constraints');
   const capabilities = useResource<Capabilities>('/capabilities');
+  const room = useResource<PublicRoomDTO>(path);
+  const plan = room.data?.planning?.plan;
   const action = useAction();
   const navigate = useNavigate();
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -69,6 +72,7 @@ export function Intake() {
       requiresFullCashRefund: data.get('refund') === 'on',
       requiresStepFreeAccess: data.get('stepFree') === 'on',
       softPreference: String(data.get('preference') || ''),
+      ...(plan ? readTripAnswers(data) : {}),
     });
     setNotes({ followUps: [], notChecked: [] });
     setSource('structured');
@@ -87,6 +91,7 @@ export function Intake() {
       <Tag><Sparkles size={14} />{source === 'ai' ? 'Accord’s draft' : 'Ready for your confirmation'}</Tag>
       <h2>Your boundaries, in your words.</h2>
       <BoundaryList constraints={draft} />
+      <TripAnswerList constraints={draft} />
       <h3>Your preference</h3>
       <p>{draft.softPreference || 'No preference added'}</p>
       {source === 'ai' && notes.notChecked.length > 0 && <div className="notice intake-note"><div><strong>Not included in this draft</strong><p>Accord books stays only, so it can’t check these: {notes.notChecked.join('; ')}.</p></div></div>}
@@ -104,7 +109,9 @@ export function Intake() {
     </section> : <>
       <section className="panel conversation-panel">
         <div className="section-heading"><h2><Sparkles size={20} /> Talk it through</h2><Tag>Private</Tag></div>
-        <p className="subtle">For example: “I can spend up to $350 and need to leave by noon Sunday. I’d rather not say why.”</p>
+        <p className="subtle">{plan
+          ? 'For example: “I can spend up to $500. I’m free any time after the 12th, and I’d love a beach or a mountain town. Anywhere but Florida.”'
+          : 'For example: “I can spend up to $350 and need to leave by noon Sunday. I’d rather not say why.”'}</p>
         {aiAvailable ? <>
           <div className="conversation-log" aria-live="polite" aria-label="Private conversation with Accord">
             {messages.length === 0 && <p className="conversation-intro">Tell Accord what would make this stay work for you. It will ask for anything it needs to clarify.</p>}
@@ -142,6 +149,7 @@ export function Intake() {
           <hr />
           <label htmlFor="preference">What would make the stay better? <span>Optional</span></label>
           <textarea id="preference" name="preference" maxLength={1000} rows={3} placeholder="A walkable neighborhood, somewhere quiet…" defaultValue={values?.softPreference || ''} />
+          {plan && <TripAnswerFields values={values ?? undefined} plan={plan} />}
           <Button>Review my requirements <ArrowRight size={17} /></Button>
         </form>
       </details>

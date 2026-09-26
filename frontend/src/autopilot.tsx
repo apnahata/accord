@@ -8,11 +8,12 @@ import type { AutopilotDTO, InboxDTO, InboxMessageDTO, PublicProposalDTO } from 
 const headings: Record<AutopilotDTO['status'], string> = {
   IDLE: 'Accord', WAITING_FOR_MEMBERS: 'Accord is waiting for everyone', SEARCHING: 'Accord is searching',
   REPLANNING: 'Accord is replanning', WIDENING: 'Accord is widening the search', WATCHING: 'Accord is keeping watch', NO_OPTION: 'No shared yes yet',
+  PLANNING: 'Accord is planning the trip', VOTING: 'Your group is voting',
 };
 
 export function AutopilotBanner({ autopilot }: { autopilot?: AutopilotDTO }) {
   if (!autopilot?.message) return null;
-  const busy = autopilot.status === 'SEARCHING' || autopilot.status === 'REPLANNING' || autopilot.status === 'WIDENING';
+  const busy = autopilot.status === 'SEARCHING' || autopilot.status === 'REPLANNING' || autopilot.status === 'WIDENING' || autopilot.status === 'PLANNING';
   return <div className={`autopilot-banner ${autopilot.status.toLowerCase()} ${busy ? 'busy' : ''}`} role="status" aria-live="polite"><span className="autopilot-mark" aria-hidden="true"><Sparkles size={16} /></span><div><strong>{headings[autopilot.status]}</strong><span>{autopilot.message}</span></div></div>;
 }
 
@@ -33,7 +34,7 @@ export function WatchLine({ proposal, now }: { proposal: PublicProposalDTO; now?
     : `Accord last checked this ${watch.method === 'PROVIDER_REQUOTE' ? 'live price with the provider' : 'offer'} ${relativeTime(watch.lastCheckedAt, now)} and keeps re-checking until the group books.`}</p>;
 }
 
-const closed: Record<string, string> = { ACCEPTED: 'You updated your requirements. Accord is searching again.', KEPT: 'You kept your requirement. Accord will keep looking.', EXPIRED: 'Your requirements changed since this was asked.' };
+const closed: Record<string, string> = { ACCEPTED: 'You updated your answers. Accord is looking again.', KEPT: 'You kept your requirement. Accord will keep looking.', EXPIRED: 'Your requirements changed since this was asked.' };
 
 /** Private messages from Accord to the signed-in member only. Open questions float to the top. */
 export function Inbox({ roomId, revision, limit = 5 }: { roomId: string; revision: number; limit?: number }) {
