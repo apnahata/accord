@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { MongoClient } from "mongodb";
+import { addDays, localDay } from "@accord/domain";
 import { createApi } from "../src/server.js";
 import { MongoPersistence } from "../src/persistence.js";
 import type { AutopilotOptions } from "../src/coordinator.js";
@@ -157,5 +158,42 @@ test("Accord's private nudge and proposal watch state survive a coordinator rest
   const answered = (await api.call(`/rooms/${roomId}/me/inbox`, "GET", undefined, cookies.Alex)).data.messages.find((message: any) => message.id === nudge.id);
   assert.equal(answered.nudge.status, "ACCEPTED");
   assert.equal((await api.call(`/rooms/${roomId}/me/constraints`, "GET", undefined, cookies.Alex)).data.constraints.maxContributionCents, 28000);
+  await api.stop();
+});
+
+test("an open trip vote survives a coordinator restart with every ballot sealed at rest", { skip, timeout: 180_000 }, async t => {
+  const { raw, dbName, boot } = throwawayDatabase(t);
+  const fast: AutopilotOptions = { readyDelayMs: 0, replanDelayMs: 0, watchIntervalMs: 0 };
+  const today = localDay(new Date().toISOString());
+  let api = await boot(fast);
+  const created = await api.call("/rooms", "POST", { name: "Spring Trip", displayName: "Alex", plan: { earliest: addDays(today, 30), latest: addDays(today, 60), nights: 3 }, rehearsal: true });
+  const roomId = created.data.roomId;
+  const cookies: Record<string, string> = { Alex: created.response.headers.get("set-cookie")!.split(";")[0]! };
+  for (const displayName of ["Priya", "Jordan"]) {
+    const joined = await api.call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName });
+    cookies[displayName] = joined.response.headers.get("set-cookie")!.split(";")[0]!;
+  }
+  for (const [displayName, cookie] of Object.entries(cookies)) {
+    const answer = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", maxContributionCents: 200000, tripStyles: displayName === "Jordan" ? ["SKI"] : ["BEACH", "CITY"], confirmed: true };
+    assert.equal((await api.call(`/rooms/${roomId}/me/constraints`, "POST", answer, cookie)).response.status, 200);
+  }
+  const options = await waitFor(async () => { const room = (await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data; return room.planning?.stage === "VOTING" && room.planning.options; }, "the shortlist");
+  const pick = options[options.length - 1];
+  assert.equal((await api.call(`/rooms/${roomId}/plan/vote`, "POST", { optionId: pick.id }, cookies.Priya)).response.status, 200);
+  await waitFor(async () => (await raw.db(dbName).collection("rooms").findOne({ _id: roomId } as any))?.planning?.sealedVotes?.data, "the sealed ballot write");
+  const doc = await raw.db(dbName).collection("rooms").findOne({ _id: roomId } as any);
+  assert.deepEqual(doc!.planning.votes, {});
+  assert.ok(!JSON.stringify(doc!.planning.sealedVotes).includes(pick.id), "ballots are stored only as ciphertext");
+
+  await api.stop();
+  api = await boot(fast);
+  const restored = (await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Priya)).data.planning;
+  assert.equal(restored.stage, "VOTING");
+  assert.equal(restored.myVoteOptionId, pick.id);
+  assert.equal(restored.votesCast, 1);
+  for (const name of ["Alex", "Jordan"]) await api.call(`/rooms/${roomId}/plan/vote`, "POST", { optionId: pick.id }, cookies[name]);
+  const decided = await waitFor(async () => { const room = (await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data; return room.activeProposalId && room; }, "the winner's proposal");
+  assert.equal(decided.trip.destination, pick.destination);
+  assert.equal(decided.planning.decidedBy, "VOTE");
   await api.stop();
 });
