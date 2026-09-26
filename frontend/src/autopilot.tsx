@@ -34,7 +34,7 @@ export function WatchLine({ proposal, now }: { proposal: PublicProposalDTO; now?
     : `Accord last checked this ${watch.method === 'PROVIDER_REQUOTE' ? 'live price with the provider' : 'offer'} ${relativeTime(watch.lastCheckedAt, now)} and keeps re-checking until the group books.`}</p>;
 }
 
-const closed: Record<string, string> = { ACCEPTED: 'You updated your answers. Accord is looking again.', KEPT: 'You kept your requirement. Accord will keep looking.', EXPIRED: 'Your requirements changed since this was asked.' };
+const closed: Record<string, string> = { ACCEPTED: 'You updated your answers. Accord is looking again.', KEPT: 'You kept your requirement. Accord will keep looking.', EXPIRED: 'This no longer applies. Nothing about your requirements changed.' };
 
 /** Private messages from Accord to the signed-in member only. Open questions float to the top. */
 export function Inbox({ roomId, revision, limit = 5 }: { roomId: string; revision: number; limit?: number }) {

@@ -27,7 +27,22 @@ test("with no shared dates, each near window names the single member who would n
   ];
   const result = dateWindows(plan, members);
   assert.deepEqual(result.windows, []);
-  assert.deepEqual(result.near, [{ checkIn: "2027-03-01", checkOut: "2027-03-03", memberId: "c" }]);
+  assert.deepEqual(result.near, [{ checkIn: "2027-03-08", checkOut: "2027-03-10", memberId: "c" }], "the ask is the smallest stretch, not the earliest date");
+});
+
+test("a date nudge asks for the fewest extra days", () => {
+  const plan = { earliest: "2026-11-01", latest: "2026-11-22", nights: 3 };
+  const members = [
+    { id: "alex", constraints: { availability: [{ from: "2026-11-06", to: "2026-11-15" }] } },
+    { id: "mateo", constraints: { availability: [{ from: "2026-11-01", to: "2026-11-13" }] } },
+    { id: "priya", constraints: { availability: [{ from: "2026-11-11", to: "2026-11-20" }] } },
+    { id: "jordan", constraints: {} },
+  ];
+  // Priya leaving a day early or Mateo staying a day longer would each unblock the trip.
+  assert.deepEqual(dateWindows(plan, members).near, [
+    { checkIn: "2026-11-10", checkOut: "2026-11-13", memberId: "priya" },
+    { checkIn: "2026-11-11", checkOut: "2026-11-14", memberId: "mateo" },
+  ]);
 });
 
 test("the DATES check only appears for members who gave dates, and dates are negotiable near misses", () => {

@@ -92,8 +92,13 @@ export function dateWindows(plan: Pick<TripPlan, "earliest" | "latest" | "nights
     if (picked.length >= limit) break;
     if (picked.every(other => window.checkIn >= other.checkOut || window.checkOut <= other.checkIn)) picked.push(window);
   }
+  const stretch = (window: DateWindow & { memberId: string }) => Math.min(...(members.find(member => member.id === window.memberId)!.constraints.availability ?? [])
+    .map(range => Math.max(0, daysBetween(window.checkIn, range.from)) + Math.max(0, daysBetween(range.to, window.checkOut))));
   const nearest = new Map<string, DateWindow & { memberId: string }>();
-  for (const window of near) if (!nearest.has(window.memberId)) nearest.set(window.memberId, window);
+  for (const window of near) {
+    const best = nearest.get(window.memberId);
+    if (!best || stretch(window) < stretch(best)) nearest.set(window.memberId, window);
+  }
   return { windows: picked, sharedCount: shared.length, near: [...nearest.values()] };
 }
 

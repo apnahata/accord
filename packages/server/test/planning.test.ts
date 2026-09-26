@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { addDays, ConstraintsSchema, localDay } from "@accord/domain";
+import { addDays, ConstraintsSchema, DESTINATIONS, localDay } from "@accord/domain";
 import { createApi } from "../src/server.js";
-import { AccordState } from "../src/state.js";
+import { AccordState, dayRange } from "../src/state.js";
 import type { DestinationIdea, DestinationsInput } from "../src/planner.js";
 
 const fast = { readyDelayMs: 0, replanDelayMs: 0, watchIntervalMs: 0 };
@@ -94,6 +94,7 @@ test("Accord plans where and when from private answers, runs a private vote, and
 
   const proposal = (await call(`/proposals/${decided.activeProposalId}/public`, "GET", undefined, cookies.Alex)).data.proposal;
   assert.equal(proposal.offer.city, underdog.destination);
+  assert.equal(proposal.offer.timeZone, DESTINATIONS.find(item => item.name === underdog.destination)!.timeZone);
   assert.equal(proposal.offer.source, "DEMO");
   const own = (await call(`/proposals/${decided.activeProposalId}/me`, "GET", undefined, cookies.Alex)).data;
   assert.equal(own.myConstraintChecks.find((check: any) => check.kind === "DATES").status, "PASS");
@@ -124,9 +125,31 @@ test("when no dates work for everyone, Accord privately asks only the one member
 
   assert.equal((await call(`/rooms/${roomId}/me/inbox/${nudge.id}/respond`, "POST", { action: "ACCEPT" }, cookies.Jordan)).status, 200);
   const replanned = await waitFor(async () => { const data = await room(); return ["VOTING", "DECIDED"].includes(data.planning?.stage) && data; }, "planning after Jordan's yes");
-  assert.deepEqual(replanned.planning.windows[0], { checkIn: day(30), checkOut: day(33) });
+  // The ask is the shared window closest to Jordan's own dates.
+  assert.deepEqual(replanned.planning.windows[0], { checkIn: day(37), checkOut: day(40) });
   const capsule = (await call(`/rooms/${roomId}/me/constraints`, "GET", undefined, cookies.Jordan)).data.constraints;
-  assert.deepEqual(capsule.availability, [{ from: day(50), to: day(60) }, { from: day(30), to: day(33) }]);
+  assert.deepEqual(capsule.availability, [{ from: day(50), to: day(60) }, { from: day(37), to: day(40) }]);
+});
+
+test("when two members could each unblock the dates, one yes retires the other's question", async t => {
+  const call = await start(t);
+  const { roomId, cookies } = await plannedGroup(call, {
+    Alex: { availability: [{ from: day(35), to: day(44) }], tripStyles: ["CITY"] },
+    Mateo: { availability: [{ from: day(30), to: day(42) }], tripStyles: ["CITY"] },
+    Priya: { availability: [{ from: day(40), to: day(49) }], tripStyles: ["BEACH"] },
+  });
+  const ask = (name: string) => waitFor(async () => (await call(`/rooms/${roomId}/me/inbox`, "GET", undefined, cookies[name])).data.messages
+    .find((message: any) => message.kind === "NUDGE"), `${name}'s date question`);
+  const [priya, mateo] = [await ask("Priya"), await ask("Mateo")];
+  assert.equal(priya.nudge.acceptLabel, `I can make ${dayRange({ checkIn: day(39), checkOut: day(42) })}`);
+  assert.equal(mateo.nudge.acceptLabel, `I can make ${dayRange({ checkIn: day(40), checkOut: day(43) })}`);
+
+  assert.equal((await call(`/rooms/${roomId}/me/inbox/${priya.id}/respond`, "POST", { action: "ACCEPT" }, cookies.Priya)).status, 200);
+  await waitFor(async () => (await call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data.planning?.stage === "VOTING", "the shortlist");
+  const retired = (await call(`/rooms/${roomId}/me/inbox`, "GET", undefined, cookies.Mateo)).data.messages.find((message: any) => message.id === mateo.id);
+  assert.equal(retired.nudge.status, "EXPIRED");
+  assert.equal((await call(`/rooms/${roomId}/me/inbox/${mateo.id}/respond`, "POST", { action: "ACCEPT" }, cookies.Mateo)).status, 409);
+  assert.deepEqual((await call(`/rooms/${roomId}/me/constraints`, "GET", undefined, cookies.Mateo)).data.constraints.availability, [{ from: day(30), to: day(42) }]);
 });
 
 function plannedState(suggest?: (input: DestinationsInput) => Promise<DestinationIdea[] | undefined>) {

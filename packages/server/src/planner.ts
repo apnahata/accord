@@ -77,6 +77,7 @@ export class Planner {
     const { windows, near, sharedCount } = dateWindows(plan, members);
     if (!windows.length) { await this.#noDates(room, planning, near, plan.nights); return; }
     planning.windows = windows;
+    for (const member of members) for (const entry of member.inbox ?? []) if (entry.nudge?.check === "DATES" && entry.nudge.status === "OPEN") entry.nudge.status = "EXPIRED";
     this.state.emit(room, "PLAN_DATES", sharedCount === 1
       ? `Only one set of dates works for everyone: ${dayRange(windows[0]!)}.`
       : `${sharedCount} possible start dates work for everyone. Accord will price ${list(windows.map(dayRange))}.`, undefined,
