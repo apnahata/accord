@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema } from "@accord/domain";
 import { Gemini } from "../../integrations/src/ai.js";
+import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 
 const name = z.string().trim().min(1).max(100);
@@ -52,9 +53,9 @@ async function serveFrontend(path: string, response: ServerResponse) {
   } catch { throw new AppError(404, "FRONTEND_NOT_BUILT"); }
 }
 
-export function createApi(options: { geminiApiKey?: string; geminiModel?: string } = {}) {
+export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch } = {}) {
   let state = new AccordState();
-  const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL });
+  const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
   const server = createServer(async (request, response) => {
     try {
@@ -97,24 +98,27 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           json(response, 200, { displayName: member.displayName, constraints: member.constraints, confirmedAt: member.confirmedAt }); return;
         }
         if (route === "me/intake/extract" && method === "POST") {
-          const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).strict().parse(await readJson(request));
+          const message = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(1000) }).strict();
+          const { messages } = z.object({ messages: z.array(message).min(1).max(24) }).strict().parse(await readJson(request));
+          if (messages.length % 2 !== 1 || messages.some((entry, index) => entry.role !== (index % 2 === 0 ? "user" : "assistant"))) throw new AppError(422, "INVALID_CONVERSATION");
           if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
-          const result = await model.generate({ input: z.object({ text: z.string(), tripDates: z.string() }).strict(), output: ExtractionSchema },
-            { text, tripDates: "March 10–14, 2027. Dates and times are in America/New_York." },
-            "Extract only supported functional constraints. Ask concise clarifying questions for ambiguity. Do not infer a private reason. This is a proposal for user review, never a confirmed constraint.");
+          const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), messages: z.array(message) }).strict(), output: ExtractionSchema },
+            { roomGoal: room.goal, timeZone: "America/New_York", messages },
+            "Interpret the full private conversation about a shared stay. The latest member answer may revise an earlier one. Extract only supported functional constraints. Ask one concise functional clarification when a requirement is ambiguous. Never infer a private reason or a maximum contribution. Resolve relative dates only when the supplied goal or conversation establishes the exact date; otherwise ask which date. If statements conflict, ask rather than guessing. The result is an unconfirmed draft, never permission to spend.");
           if (result.status !== "OK") throw new AppError(503, "AI_UNAVAILABLE");
           const extraction = result.value.data;
           if (extraction.unsupportedHardRequirements.length || extraction.ambiguities.length) {
-            json(response, 200, { needsClarification: extraction.ambiguities[0]?.question ?? "Please use the structured form for an unsupported hard requirement." }); return;
+            json(response, 200, { stage: "CLARIFYING", reply: extraction.ambiguities[0]?.question ?? "I can't verify one of those requirements for a stay yet. Can you describe the functional requirement another way?" }); return;
           }
-          if (extraction.proposed.maxContributionCents === undefined) { json(response, 200, { needsClarification: "What is your maximum personal contribution?" }); return; }
-          json(response, 200, { constraints: {
+          if (extraction.proposed.maxContributionCents === undefined) { json(response, 200, { stage: "CLARIFYING", reply: "What is the most you would personally contribute to this stay?" }); return; }
+          const constraints = ConstraintsSchema.parse({
             maxContributionCents: extraction.proposed.maxContributionCents,
             latestCheckOutAt: extraction.proposed.latestCheckOutAt,
             requiresFullCashRefund: extraction.proposed.requiresFullCashRefund ?? false,
             requiresStepFreeAccess: extraction.proposed.requiresStepFreeAccess ?? false,
             softPreference: extraction.proposed.softPreferences?.map(item => item.kind.toLowerCase().replaceAll("_", " ")).join(", ") ?? "",
-          }, requiresConfirmation: true }); return;
+          });
+          json(response, 200, { stage: "REVIEW", reply: "I have a draft for you to review. Nothing has been applied yet.", constraints, requiresConfirmation: true }); return;
         }
         if (route === "solve" && method === "POST") {
           await readJson(request);

@@ -7,15 +7,15 @@ This ledger records verified proof only. A configured adapter, local synthetic t
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
 - **Credentials/account:** Not configured.
-- **Feature:** Guarded Gemini structured intake candidate; public/private model explanations are not wired.
+- **Feature:** Private conversation-first intake route with structured clarification and a reviewable draft; public/private model explanations are not wired.
 - **Why Accord needs it:** Convert members' natural language into a reviewable proposal while keeping deterministic feasibility and consent in the backend.
-- **Implementation:** `packages/server/src/server.ts` uses `packages/integrations/src/ai.ts` and validates against `@accord/domain` extraction schema. The user must separately confirm via `/me/constraints`.
+- **Implementation:** `frontend/src/pages-intake.tsx` sends the member's conversation to `packages/server/src/server.ts`, which uses `packages/integrations/src/ai.ts` and validates against `@accord/domain` extraction schema. The user must separately confirm via `/me/constraints`. The local multi-turn test uses a fake provider response, not live Gemini.
 - **Code path:** `POST /api/rooms/:id/me/intake/extract`.
 - **Live proof:** None.
 - **Screenshot:** None.
 - **Transaction/query/reference:** None.
 - **Failure behavior:** Returns `AI_UNAVAILABLE`; structured manual intake remains available.
-- **Known limitations:** No API key, completed real call, public/private model explanations or deployed UI verification.
+- **Known limitations:** No API key, completed real call, public/private model explanations, persisted draft conversation, or deployed UI verification.
 - **Submission status:** Not verified; do not claim use yet.
 
 ## Tiger Data
