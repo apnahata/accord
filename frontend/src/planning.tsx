@@ -3,7 +3,7 @@ import { CalendarDays, Check, Compass, MapPin, Sparkles, Vote } from 'lucide-rea
 import { Button, ErrorNotice, LinkButton, Loading, Tag } from './components';
 import { money, post } from './api';
 import { useAction } from './hooks';
-import type { Availability, Constraints, PublicRoomDTO, TripPlan, TripStyle } from './contracts';
+import type { Availability, Constraints, PublicRoomDTO, TripStyle } from './contracts';
 
 export const styleLabels: Record<TripStyle, string> = {
   BEACH: 'Beach', MOUNTAINS: 'Mountains', SKI: 'Ski', CITY: 'City', NATURE: 'Nature', THEME_PARKS: 'Theme parks', LAKE: 'Lake',
@@ -11,11 +11,13 @@ export const styleLabels: Record<TripStyle, string> = {
 const styles = Object.keys(styleLabels) as TripStyle[];
 const day = (value: string, withYear = false) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', ...(withYear ? { year: 'numeric' } : {}), timeZone: 'UTC' }).format(new Date(`${value}T12:00:00Z`));
 export const dayRange = (from: string, to: string) => `${day(from)} – ${day(to, true)}`;
-export const planSummary = (plan: TripPlan) => `${plan.nights} ${plan.nights === 1 ? 'night' : 'nights'} sometime between ${dayRange(plan.earliest, plan.latest)} · where to be decided together`;
-
 type Planning = NonNullable<PublicRoomDTO['planning']>;
+export const planSummary = (planning: Planning) => planning.windows.length
+  ? `${nightsLabel(planning.windows[0]!.checkIn, planning.windows[0]!.checkOut)} · where to be decided together`
+  : 'When and where to be decided together';
+const nightsLabel = (checkIn: string, checkOut: string) => { const nights = Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / 86_400_000); return `${nights} ${nights === 1 ? 'night' : 'nights'}`; };
 
-/** What Accord is considering, and the private vote. Everything shown is host-set or an anonymous total. */
+/** What Accord is considering, and the private vote. Everything shown is an anonymous total or Accord’s own work. */
 export function PlanningBoard({ room, base, onChange, invite }: { room: PublicRoomDTO; base: string; onChange: () => void; invite: React.ReactNode }) {
   const planning = room.planning!;
   const action = useAction();
@@ -25,7 +27,7 @@ export function PlanningBoard({ room, base, onChange, invite }: { room: PublicRo
     <div className="section-heading"><p className="eyebrow"><Compass size={13} />Planning together</p>{planning.rehearsal && <Tag tone="warm">Rehearsal stays</Tag>}</div>
     <h2>{title}</h2>
     {planning.stage === 'COLLECTING' && <>
-      <p>{planning.answered} of {planning.total} have answered. Each person privately tells Accord when they can go, what kind of trip they’d love, and what they can spend. Accord plans on its own once everyone has answered.</p>
+      <p>{planning.answered} of {planning.total} have answered. Each person, host included, privately tells Accord when they can go, for how long, where they’re leaving from, what kind of trip they’d love, and what they can spend. Accord plans on its own once everyone has answered.</p>
       <div className="button-row">{room.members.find(member => member.isYou)?.ready
         ? <LinkButton to={`${base}/me/intake`} secondary>Review my answers</LinkButton>
         : <LinkButton to={`${base}/me/intake`}>Answer privately</LinkButton>}</div>
@@ -89,19 +91,24 @@ function PlanningResults({ planning }: { planning: Planning }) {
 }
 
 /** Trip-planning questions for the private intake form. Uncontrolled; read back with `readTripAnswers`. */
-export function TripAnswerFields({ values, plan }: { values?: Constraints; plan: TripPlan }) {
+export function TripAnswerFields({ values, horizon }: { values?: Constraints; horizon: Planning['horizon'] }) {
   const [ranges, setRanges] = useState<Array<Partial<Availability>>>(values?.availability?.length ? values.availability : [{}]);
   return <>
     <hr />
     <div className="section-heading"><h2>Your trip wishes</h2><Compass size={20} /></div>
-    <p className="subtle">The group is planning {plan.nights} nights between {dayRange(plan.earliest, plan.latest)}. Only anonymous totals are ever shown to the group.</p>
-    <label>When could you go? <span>Optional</span></label>
+    <p className="subtle">Accord works out when and where from everyone’s answers. Only anonymous totals are ever shown to the group.</p>
+    <label>When could you go? <span>Required</span></label>
     {ranges.map((range, index) => <div className="trip-fields availability-row" key={index}>
-      <div><label htmlFor={`from-${index}`} className="sr-only">Earliest day you could leave</label><input id={`from-${index}`} name={`from-${index}`} type="date" min={plan.earliest} max={plan.latest} defaultValue={range.from} aria-label="Earliest day you could leave" /></div>
-      <div><label htmlFor={`to-${index}`} className="sr-only">Latest day you could be back</label><input id={`to-${index}`} name={`to-${index}`} type="date" min={plan.earliest} max={plan.latest} defaultValue={range.to} aria-label="Latest day you could be back" /></div>
+      <div><label htmlFor={`from-${index}`} className="sr-only">Earliest day you could leave</label><input id={`from-${index}`} name={`from-${index}`} type="date" required={index === 0} min={horizon.earliest} max={horizon.latest} defaultValue={range.from} aria-label="Earliest day you could leave" /></div>
+      <div><label htmlFor={`to-${index}`} className="sr-only">Latest day you could be back</label><input id={`to-${index}`} name={`to-${index}`} type="date" required={index === 0} min={horizon.earliest} max={horizon.latest} defaultValue={range.to} aria-label="Latest day you could be back" /></div>
     </div>)}
     {ranges.length < 3 && <button type="button" className="text-button" onClick={() => setRanges([...ranges, {}])}>Add another stretch of dates</button>}
-    <p className="field-help">From the earliest day you could leave to the latest day you could be back. Leave blank if any dates in the window work.</p>
+    <p className="field-help">From the earliest day you could leave to the latest day you could be back, within the next six months.</p>
+    <div className="trip-fields">
+      <div><label htmlFor="nights">How many nights? <span>Optional</span></label><input id="nights" name="nights" type="number" min={1} max={14} placeholder="3" defaultValue={values?.nights ?? ''} /></div>
+      <div><label htmlFor="leaving-from">Leaving from <span>Optional</span></label><input id="leaving-from" name="leavingFrom" maxLength={120} placeholder="Boston" defaultValue={values?.leavingFrom || ''} /></div>
+    </div>
+    <p className="field-help">Accord goes with the trip length most people want, and looks for places that are a reasonable trip from where everyone is.</p>
     <label>What kind of trip would you love? <span>Pick any</span></label>
     <div className="chip-row style-picker">{styles.map(style => <label key={style} className="chip-toggle"><input type="checkbox" name="style" value={style} defaultChecked={values?.tripStyles?.includes(style)} /><span>{styleLabels[style]}</span></label>)}</div>
     <label htmlFor="place-ideas">Anywhere you’d love to go? <span>Optional</span></label>
@@ -118,15 +125,19 @@ export function readTripAnswers(data: FormData): Partial<Constraints> {
     if (from && to && to > from) availability.push({ from, to });
   }
   const tripStyles = data.getAll('style').map(String) as TripStyle[];
-  const placeIdeas = String(data.get('placeIdeas') || '').trim(), placesToAvoid = String(data.get('placesToAvoid') || '').trim();
-  return { ...(availability.length ? { availability } : {}), ...(tripStyles.length ? { tripStyles } : {}), ...(placeIdeas ? { placeIdeas } : {}), ...(placesToAvoid ? { placesToAvoid } : {}) };
+  const placeIdeas = String(data.get('placeIdeas') || '').trim(), placesToAvoid = String(data.get('placesToAvoid') || '').trim(), leavingFrom = String(data.get('leavingFrom') || '').trim();
+  const nights = Number(data.get('nights') || 0);
+  return { ...(availability.length ? { availability } : {}), ...(tripStyles.length ? { tripStyles } : {}), ...(placeIdeas ? { placeIdeas } : {}), ...(placesToAvoid ? { placesToAvoid } : {}),
+    ...(nights ? { nights } : {}), ...(leavingFrom ? { leavingFrom } : {}) };
 }
 
 /** Read-only view of a member's own trip answers. */
 export function TripAnswerList({ constraints }: { constraints: Constraints }) {
-  if (!constraints.availability?.length && !constraints.tripStyles?.length && !constraints.placeIdeas && !constraints.placesToAvoid) return null;
+  if (!constraints.availability?.length && !constraints.tripStyles?.length && !constraints.placeIdeas && !constraints.placesToAvoid && !constraints.nights && !constraints.leavingFrom) return null;
   return <dl className="boundary-list">
-    <div><dt>When you can go</dt><dd>{constraints.availability?.length ? constraints.availability.map(range => dayRange(range.from, range.to)).join('; ') : 'Any dates in the window'}</dd></div>
+    <div><dt>When you can go</dt><dd>{constraints.availability?.length ? constraints.availability.map(range => dayRange(range.from, range.to)).join('; ') : 'Not given yet'}</dd></div>
+    {!!constraints.nights && <div><dt>Trip length</dt><dd>{constraints.nights} {constraints.nights === 1 ? 'night' : 'nights'}</dd></div>}
+    {constraints.leavingFrom && <div><dt>Leaving from</dt><dd>{constraints.leavingFrom}</dd></div>}
     {!!constraints.tripStyles?.length && <div><dt>Trip styles</dt><dd>{constraints.tripStyles.map(style => styleLabels[style]).join(', ')}</dd></div>}
     {constraints.placeIdeas && <div><dt>Would love</dt><dd>{constraints.placeIdeas}</dd></div>}
     {constraints.placesToAvoid && <div><dt>Rather not</dt><dd>{constraints.placesToAvoid}</dd></div>}

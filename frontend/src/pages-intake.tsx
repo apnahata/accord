@@ -29,7 +29,7 @@ export function Intake() {
   const capsule = useResource<CapsuleDTO>(path + '/me/constraints');
   const capabilities = useResource<Capabilities>('/capabilities');
   const room = useResource<PublicRoomDTO>(path);
-  const plan = room.data?.planning?.plan;
+  const planning = room.data?.trip ? undefined : room.data?.planning;
   const action = useAction();
   const navigate = useNavigate();
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -72,7 +72,7 @@ export function Intake() {
       requiresFullCashRefund: data.get('refund') === 'on',
       requiresStepFreeAccess: data.get('stepFree') === 'on',
       softPreference: String(data.get('preference') || ''),
-      ...(plan ? readTripAnswers(data) : {}),
+      ...(planning ? readTripAnswers(data) : {}),
     });
     setNotes({ followUps: [], notChecked: [] });
     setSource('structured');
@@ -109,8 +109,8 @@ export function Intake() {
     </section> : <>
       <section className="panel conversation-panel">
         <div className="section-heading"><h2><Sparkles size={20} /> Talk it through</h2><Tag>Private</Tag></div>
-        <p className="subtle">{plan
-          ? 'For example: “I can spend up to $500. I’m free any time after the 12th, and I’d love a beach or a mountain town. Anywhere but Florida.”'
+        <p className="subtle">{planning
+          ? 'For example: “I can spend up to $500. I’m free Nov 7–16 and would like about 4 nights, leaving from Boston. I’d love a beach or a mountain town. Anywhere but Florida.”'
           : 'For example: “I can spend up to $350 and need to leave by noon Sunday. I’d rather not say why.”'}</p>
         {aiAvailable ? <>
           <div className="conversation-log" aria-live="polite" aria-label="Private conversation with Accord">
@@ -149,7 +149,7 @@ export function Intake() {
           <hr />
           <label htmlFor="preference">What would make the stay better? <span>Optional</span></label>
           <textarea id="preference" name="preference" maxLength={1000} rows={3} placeholder="A walkable neighborhood, somewhere quiet…" defaultValue={values?.softPreference || ''} />
-          {plan && <TripAnswerFields values={values ?? undefined} plan={plan} />}
+          {planning && <TripAnswerFields values={values ?? undefined} horizon={planning.horizon} />}
           <Button>Review my requirements <ArrowRight size={17} /></Button>
         </form>
       </details>
