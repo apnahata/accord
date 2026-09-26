@@ -47,6 +47,8 @@ export type StayResearchDTO = { sourceLabel: string; pros: string[]; cons: strin
 export type PublicOfferDTO = {
   offerId: string; offerVersion: string; merchantName: string; propertyName: string;
   city: string; roomType: string; checkInAt: string; checkOutAt: string;
+  /** IANA zone of the stay; check-in and check-out times are shown in it. */
+  timeZone: string;
   guestCapacity: number; stepFreeVerified: boolean | null; cancellationLabel: string;
   subtotalCents: number; mandatoryFeesCents: number; totalCents: number;
   equalShareCents: number; available: boolean; expiresAt: string; feasible: boolean;

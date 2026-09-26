@@ -66,8 +66,8 @@ export function post<T>(path: string, body: unknown = {}, headers?: HeadersInit)
 }
 export const segment = (value: string) => encodeURIComponent(value);
 export const money = (cents: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: cents % 100 ? 2 : 0 }).format(cents / 100);
-export const date = (value: string) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }).format(new Date(value));
-export const dateTime = (value: string) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' }).format(new Date(value));
+export const date = (value: string, timeZone = 'America/New_York') => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone }).format(new Date(value));
+export const dateTime = (value: string, timeZone = 'America/New_York') => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone, timeZoneName: 'short' }).format(new Date(value));
 export function safeExplorer(url?: string) {
   if (!url) return undefined;
   try { const parsed = new URL(url); return parsed.protocol === 'https:' && parsed.hostname === 'explorer.solana.com' && parsed.pathname.startsWith('/tx/') && parsed.searchParams.get('cluster') === 'devnet' ? parsed.href : undefined; } catch { return undefined; }
