@@ -9,6 +9,8 @@ import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 import { MongoPersistence } from "./persistence.js";
 import { GoogleHotels, LiteApi } from "./stays.js";
+import { configuredSolana } from "./solana-config.js";
+import type { SolanaCommitments } from "../../integrations/src/solana.js";
 import { normalizeModelCheckout } from "./model-time.js";
 import { triageExtraction } from "./intake.js";
 import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
@@ -59,7 +61,7 @@ async function serveFrontend(path: string, response: ServerResponse) {
 }
 
 export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence;
-  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch } = {}) {
+  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; solana?: SolanaCommitments } = {}) {
   const persistence = options.persistence;
   const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
@@ -67,6 +69,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
   const providers = {
     ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch) } : {}),
     ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch) } : {}),
+    ...(options.solana ? { solana: options.solana } : {}),
     ...(aiConfigured ? { summarize: async (facts: unknown) => {
       const result = await model.generate({ input: z.unknown(), output: z.object({ summary: z.string().max(400) }).strict() }, facts,
         "Write one or two plain sentences (max 45 words) telling a group of friends what this stay is like, using only the supplied public listing facts. No names of group members, no budgets, no invented facts, no marketing language.");
@@ -81,7 +84,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       const method = request.method ?? "GET";
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (method === "GET" && path === "/api/health") {
-        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "DOWN" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", tiger: "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
+        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "DOWN" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", tiger: "UNCONFIGURED", solana: options.solana ? (await options.solana.operatorReady() ? "UP" : "DOWN") : "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
       }
       if (method === "GET" && path === "/api/capabilities") {
         await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: false } }); return;
@@ -268,7 +271,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.exit(1);
     }
   }
-  const { server, state } = createApi({ persistence });
+  const solana = await configuredSolana();
+  const { server, state } = createApi({ persistence, solana });
   await state.ready;
   const port = Number(process.env.PORT ?? "3000");
   server.listen(port, "0.0.0.0", () => process.stdout.write(`Accord API listening on ${port} (state: ${persistence ? "MongoDB" : "memory only"})\n`));

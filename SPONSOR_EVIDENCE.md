@@ -1,6 +1,6 @@
 # Accord sponsor evidence ledger
 
-This ledger separates live provider proof from local synthetic tests, code paths, and deployment templates. A Gemini key is configured locally in a gitignored `.env`; other external services remain placeholders. No sponsor submission is marked complete.
+This ledger separates live provider proof from local synthetic tests, code paths, and deployment templates. Gemini and a generated Solana devnet operator key are configured locally in a gitignored `.env`; other external services remain placeholders. No sponsor submission is marked complete.
 
 ## Gemini / Google AI
 
@@ -54,16 +54,16 @@ This ledger separates live provider proof from local synthetic tests, code paths
 
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
-- **Credentials/account:** No operator devnet signer configured.
-- **Feature:** Planned devnet operator commitment to the backend proposal hash.
+- **Credentials/account:** A locally generated operator seed is in the gitignored `.env`; its public devnet address is `H4TbUH5PahmUdTPPdMbJYcinGsEqcE2KXhdkbki33nU4`. The address currently has 0 lamports.
+- **Feature:** Optional devnet operator commitments for proposal creation, staleness and confirmed booking, using the backend's canonical proposal hash.
 - **Why Accord needs it:** Provide an external reference to nonprivate proposal versions while backend consent remains authoritative.
-- **Implementation:** Generic adapter in `packages/integrations/src/solana.ts`; canonical hashes come from `@accord/domain`. No API transaction wiring.
-- **Code path:** Proposal DTO in `packages/server/src/state.ts` reports `NOT_RECORDED`.
-- **Live proof:** None.
+- **Implementation:** The API loads the server-only signer, verifies the full devnet genesis hash, checks operator balance, signs a Memo transaction containing only public references and the domain proposal hash, persists the signed transaction before broadcast, and polls for confirmation. The backend queues commitments after proposal creation, stale invalidation and confirmed booking. The public DTO and UI show an explorer link only after confirmation; the UI calls it an **operator** commitment, not a member signature. With no signer, the feature reports `NOT_RECORDED`.
+- **Code path:** `packages/server/src/solana-config.ts`, `packages/server/src/state.ts`, `packages/integrations/src/solana.ts`, `frontend/src/components.tsx`, `tools/verify-solana.mjs`.
+- **Live proof:** On 2026-09-26 a real devnet RPC genesis/balance query succeeded. The local Accord smoke created proposal v1, changed merchant price, and produced a distinct v2 hash; both audit attempts truthfully reported `FAILED` because the operator balance was zero. A programmatic RPC airdrop returned an internal error at 0.1 SOL and rate limit/faucet-dry response at 0.01 SOL; the documented proof-of-work faucet tool also failed at its initial airdrop request. The record is in `sponsor-evidence/solana-devnet-smoke.json` with `verified: false`. A controlled lifecycle test covers backend event wiring but is not chain proof.
 - **Screenshot:** None.
 - **Transaction/query/reference:** None; no signature or explorer URL exists.
-- **Failure behavior:** Backend consent stays enforced, and no explorer link is shown.
-- **Known limitations:** No funded devnet signer, genuine transaction, hash-difference test or confirmation proof.
+- **Failure behavior:** An unfunded/unavailable operator results in `FAILED` (or `NOT_RECORDED` when unconfigured). Backend consent and booking safety remain enforced, and no explorer link is shown.
+- **Known limitations:** No funded signer, on-chain transaction, explorer proof, or deployed operator worker. The current worker is process-local and retries pending confirmations for a bounded period; a signed transaction can be rebroadcast after restart while its blockhash remains valid.
 - **Submission status:** Not verified; do not claim an on-chain commitment yet.
 
 ## Vultr

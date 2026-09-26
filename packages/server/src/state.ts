@@ -9,6 +9,7 @@ import {
 } from "@accord/domain";
 import { Merchant, type MerchantContract } from "../../integrations/src/merchant.js";
 import { RoomStreams } from "../../integrations/src/realtime.js";
+import type { CommitmentInput, CommitmentResult, SolanaCommitments } from "../../integrations/src/solana.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
 import type { ExternalRef, GoogleHotels, LiteApi, LiteRef, LiveStay, ProviderResult, StayResearch } from "./stays.js";
 import { SESSION_TTL_SECONDS, type MongoPersistence, type RoomAggregate, type SealedValue, type SessionRecord } from "./persistence.js";
@@ -19,6 +20,8 @@ export class AppError extends Error {
 type Member = { id: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number };
 type Approval = { proposalHash: string; status: "APPROVED" | "INVALIDATED"; approvedAt: string };
 type Authorization = { proposalHash: string; amountCents: number; status: "AUTHORIZED" | "INVALIDATED"; providerRef: string };
+type CommitmentEvent = CommitmentInput["eventType"];
+type StoredCommitment = CommitmentResult & { wireTransaction?: string; lastValidBlockHeight?: string };
 type Proposal = {
   id: string; roomId: string; version: number; hash: string; snapshot: {
     roomId: string; proposalId: string; version: number; memberIds: string[]; offer: Offer;
@@ -29,13 +32,16 @@ type Proposal = {
   approvals: Map<string, Approval>; authorizations: Map<string, Authorization>;
   /** Provider handle for the approved stay (not part of the hashed snapshot; never private). */
   providerRef?: LiteRef | ExternalRef;
+  /** Optional operator audit. Never changes consent or booking permission. */
+  commitments?: Partial<Record<CommitmentEvent, StoredCommitment>>;
 };
 type LiveSearch = {
   searchedAt: string; googleSearchedAt?: string; offerIds: string[]; providers: ProviderResult[];
   research: Record<string, StayResearch>; refs: Record<string, LiteRef | ExternalRef>;
 };
 type Booking = { reference: string; confirmedAt: string; proposalId: string; mode?: "SIMULATED" | "SANDBOX" | "EXTERNAL"; externalUrl?: string; hotelConfirmationCode?: string };
-export type StayProviders = { liteApi?: LiteApi; google?: GoogleHotels; summarize?: (facts: unknown) => Promise<string | undefined> };
+export type StayProviders = { liteApi?: LiteApi; google?: GoogleHotels; summarize?: (facts: unknown) => Promise<string | undefined>;
+  solana?: Pick<SolanaCommitments, "record" | "reconcile" | "resumeSigned"> };
 const GOOGLE_CACHE_MS = 30 * 60 * 1000;
 const money = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
 const cancellationLabel = (offer: Offer) => offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "Full cash refund" : offer.cancellationPolicyCode === "TRAVEL_CREDIT" ? "Travel credit only" : "Non-refundable";
@@ -81,12 +87,19 @@ export class AccordState {
   #dirtyInvitations = new Set<string>();
   #removedMembers = new Set<string>();
   #removedSessions = new Set<string>();
+  #commitmentJobs = new Set<string>();
+  #commitmentPolls = new Map<string, number>();
 
   /** Without persistence, state is process memory only. With Mongo, memory is a write-through working copy. */
   constructor(readonly persistence?: MongoPersistence, readonly providers: StayProviders = {}) {
     this.store = persistence ? persistence.merchantStore as MerchantBackend : new MemoryMerchantStore<Offer, MerchantEvent>();
     const merchant = this.merchant = new Merchant(this.store, merchantContract);
     this.ready = (async () => { if (persistence) await this.#hydrate(); await merchant.seed(demoCatalog()); })();
+    void this.ready.then(() => {
+      for (const proposal of this.proposals.values()) for (const [event, record] of Object.entries(proposal.commitments ?? {})) {
+        if (record.status === "PENDING") this.#queueCommitment(proposal, event as CommitmentEvent);
+      }
+    }).catch(() => undefined);
     this.streams = new RoomStreams(PublicEventSchema, PrivateEventSchema, async request => {
       const session = this.sessionFromCookie(request.headers.cookie);
       return session ? { roomId: session.roomId, memberId: session.memberId } : null;
@@ -328,6 +341,7 @@ export class AccordState {
     this.emit(room, "SOLVE_COMPLETED", room.trip ? `${suitable} of ${data.offers.length} live stays meet every confirmed requirement.` : `Accord evaluated ${data.offers.length} demo stays.`);
     if (room.trip) void this.#summarize(room, data.offers.filter(item => item.feasible).slice(0, 3).map(item => item.offerId));
     this.emit(room, "PROPOSAL_CREATED", `Proposal v${version} opened.`, id);
+    this.#queueCommitment(proposal, "PROPOSAL_CREATED");
     return this.publicProposal(proposal);
   }
   requireProposal(id: string, session?: { roomId: string; memberId: string }) {
@@ -345,7 +359,13 @@ export class AccordState {
       equalShareCents: Math.ceil(offer.totalCents / proposal.snapshot.memberIds.length),
       authorization: { authorizedCount: authorized.length, requiredCount: proposal.snapshot.memberIds.length,
         authorizedTotalCents: authorized.reduce((sum, value) => sum + value.amountCents, 0), requiredTotalCents: offer.totalCents },
-      expiresAt: proposal.snapshot.expiresAt, solana: { status: "NOT_RECORDED" } };
+      expiresAt: proposal.snapshot.expiresAt,
+      solana: proposal.commitments?.PROPOSAL_CREATED
+        ? { status: proposal.commitments.PROPOSAL_CREATED.status,
+          ...(proposal.commitments.PROPOSAL_CREATED.transactionSignature ? { transactionSignature: proposal.commitments.PROPOSAL_CREATED.transactionSignature } : {}),
+          ...(proposal.commitments.PROPOSAL_CREATED.status === "CONFIRMED" && proposal.commitments.PROPOSAL_CREATED.explorerUrl
+            ? { explorerUrl: proposal.commitments.PROPOSAL_CREATED.explorerUrl } : {}) }
+        : { status: "NOT_RECORDED" } };
     return { roomId: room.id, proposal: publicProposal,
       paymentModeLabel: "Simulated contribution authorization — no card charged",
       bookingModeLabel: offer.source === "LITEAPI" ? "LiteAPI sandbox booking — the live price is re-checked first; no card is charged"
@@ -431,6 +451,7 @@ export class AccordState {
     catch { throw new AppError(409, "MERCHANT_BOOKING_FAILED"); }
     room.booking = { reference: booking.bookingReference, confirmedAt: booking.confirmedAt, proposalId: proposal.id };
     proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
+    this.#queueCommitment(proposal, "BOOKING_CONFIRMED");
     try { await this.store.drain(async (_eventId, event) => { if (event.type === "BOOKING_CONFIRMED") this.emit(room, "BOOKING_CONFIRMED", "One controlled demo booking was confirmed.", proposal.id); }); }
     catch { /* Booking is confirmed. A failed optional event fanout cannot erase the receipt. */ }
     return this.receipt(room);
@@ -463,6 +484,7 @@ export class AccordState {
       room.booking = { reference: result.bookingId, confirmedAt: nowIso(), proposalId: proposal.id, mode: "SANDBOX", ...(result.hotelConfirmationCode ? { hotelConfirmationCode: result.hotelConfirmationCode } : {}) };
       proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
       this.emit(room, "BOOKING_CONFIRMED", `LiteAPI sandbox booking ${result.bookingId} confirmed at the approved price.`, proposal.id);
+      this.#queueCommitment(proposal, "BOOKING_CONFIRMED");
       return this.receipt(room);
     });
   }
@@ -509,7 +531,62 @@ export class AccordState {
     for (const approval of proposal.approvals.values()) approval.status = "INVALIDATED";
     for (const authorization of proposal.authorizations.values()) authorization.status = "INVALIDATED";
     this.emit(room, "PROPOSAL_STALE", "The offer changed. Previous approval cannot be used.", proposal.id);
+    this.#queueCommitment(proposal, "PROPOSAL_STALE");
     for (const id of room.memberIds) this.streams.publishPrivate(room.id, id, randomUUID(), { roomId: room.id, type: "PROPOSAL_STALE", proposalId: proposal.id, at: nowIso() });
+  }
+
+  /** Optional operator audit. A failed transaction cannot affect Accord's local consent rules. */
+  #queueCommitment(proposal: Proposal, event: CommitmentEvent, delayMs = 0) {
+    if (!this.providers.solana) return;
+    const room = this.rooms.get(proposal.roomId);
+    if (!room) return;
+    proposal.commitments ??= {};
+    if (!proposal.commitments[event]) { proposal.commitments[event] = { status: "PENDING" }; this.#dirtyRooms.add(room.id); }
+    const key = `${proposal.id}:${event}`;
+    if (this.#commitmentJobs.has(key)) return;
+    this.#commitmentJobs.add(key);
+    const timer = setTimeout(() => {
+      void this.#processCommitment(proposal, event).then(status => {
+        this.#commitmentJobs.delete(key);
+        const polls = (this.#commitmentPolls.get(key) ?? 0) + 1;
+        if (status === "PENDING" && polls < 60) { this.#commitmentPolls.set(key, polls); this.#queueCommitment(proposal, event, 2_000); }
+        else this.#commitmentPolls.delete(key);
+      }).catch(() => { this.#commitmentJobs.delete(key); });
+    }, delayMs);
+    timer.unref();
+  }
+
+  async #processCommitment(proposal: Proposal, event: CommitmentEvent): Promise<CommitmentResult["status"]> {
+    const solana = this.providers.solana!;
+    const room = this.rooms.get(proposal.roomId)!;
+    const stored = proposal.commitments![event]!;
+    const previousStatus = stored.status;
+    const previousSignature = stored.transactionSignature;
+    const previousCode = stored.code;
+    await this.flush(); // The proposal/event must exist before signing or broadcasting.
+    const result = stored.transactionSignature
+      ? stored.wireTransaction && stored.lastValidBlockHeight
+        ? await solana.resumeSigned(stored.transactionSignature, stored.wireTransaction, stored.lastValidBlockHeight)
+        : await solana.reconcile(stored.transactionSignature)
+      : await solana.record({ roomPublicRef: hashToken(room.id).slice(0, 32), proposalId: proposal.id,
+        proposalVersion: proposal.version, proposalHash: proposal.hash, eventType: event }, async pending => {
+        stored.transactionSignature = pending.transactionSignature;
+        stored.wireTransaction = pending.wireTransaction;
+        stored.lastValidBlockHeight = pending.lastValidBlockHeight;
+        this.#dirtyRooms.add(room.id);
+        await this.flush(); // Persist the signed transaction before broadcast.
+      });
+    stored.status = result.status;
+    stored.code = result.code;
+    stored.transactionSignature = result.transactionSignature ?? stored.transactionSignature;
+    stored.explorerUrl = result.status === "CONFIRMED" ? result.explorerUrl : undefined;
+    if (result.status !== "PENDING") { delete stored.wireTransaction; delete stored.lastValidBlockHeight; }
+    if (result.status !== previousStatus || stored.transactionSignature !== previousSignature || stored.code !== previousCode) this.#dirtyRooms.add(room.id);
+    if (result.status !== previousStatus) this.emit(room, "SOLANA_COMMITMENT_UPDATED", result.status === "CONFIRMED"
+      ? `Accord recorded an operator commitment for ${event.toLowerCase().replaceAll("_", " ")} on Solana devnet.`
+      : `Solana audit commitment for ${event.toLowerCase().replaceAll("_", " ")} is ${result.status.toLowerCase()}.`, proposal.id);
+    await this.flush();
+    return result.status;
   }
   async mutate(offerId: string, expectedVersion: string, mutation: MerchantMutation) {
     let release!: () => void;
@@ -556,6 +633,7 @@ export class AccordState {
       }),
       proposals: [...this.proposals.values()].filter(proposal => proposal.roomId === room.id).map(proposal => ({
         _id: proposal.id, roomId: proposal.roomId, version: proposal.version, hash: proposal.hash, state: proposal.state, providerRef: proposal.providerRef ?? null,
+        commitments: structuredClone(proposal.commitments ?? {}),
         snapshot: structuredClone(proposal.snapshot),
         approvals: Object.fromEntries(proposal.approvals), authorizations: Object.fromEntries(proposal.authorizations),
       })),
@@ -593,7 +671,7 @@ export class AccordState {
     }
     for (const doc of data.proposals) {
       this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state, ...(doc.providerRef ? { providerRef: doc.providerRef } : {}),
-        snapshot: doc.snapshot, approvals: new Map(Object.entries(doc.approvals ?? {})), authorizations: new Map(Object.entries(doc.authorizations ?? {})) });
+        snapshot: doc.snapshot, commitments: doc.commitments ?? {}, approvals: new Map(Object.entries(doc.approvals ?? {})), authorizations: new Map(Object.entries(doc.authorizations ?? {})) });
     }
     for (const doc of data.sessions) this.sessions.set(String(doc._id), { roomId: doc.roomId, memberId: doc.memberId, createdAt: new Date(doc.createdAt).toISOString() });
     for (const doc of data.invitations) this.invitations.set(String(doc._id), doc.roomId);

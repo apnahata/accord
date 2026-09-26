@@ -15,9 +15,23 @@ export type CommitmentResult = {
   status: "PENDING" | "CONFIRMED" | "FAILED";
   transactionSignature?: string; explorerUrl?: string; code?: string;
 };
+const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 
 export class SolanaCommitments {
   constructor(private readonly signer?: KeyPairSigner, private readonly rpc = createSolanaRpc("https://api.devnet.solana.com")) {}
+
+  get operatorAddress() { return this.signer?.address; }
+  async devnetAvailable() {
+    try { return await this.rpc.getGenesisHash().send({ abortSignal: AbortSignal.timeout(10_000) }) === DEVNET_GENESIS_HASH; }
+    catch { return false; }
+  }
+  async operatorReady() {
+    if (!this.signer || !await this.devnetAvailable()) return false;
+    try {
+      const balance = await this.rpc.getBalance(this.signer.address).send({ abortSignal: AbortSignal.timeout(10_000) });
+      return balance.value >= 100_000n;
+    } catch { return false; }
+  }
 
   /** Persist returned signature/status; reconcile PENDING rather than submitting another commitment. */
   async record(input: CommitmentInput, persistBeforeBroadcast: (pending: { transactionSignature: string; wireTransaction: string; lastValidBlockHeight: string }) => Promise<void>): Promise<CommitmentResult> {
@@ -26,7 +40,9 @@ export class SolanaCommitments {
     try {
       const data = commitment.parse(input);
       // Also prevents a misconfigured RPC from spending mainnet funds.
-      if (await this.rpc.getGenesisHash().send({ abortSignal: AbortSignal.timeout(10_000) }) !== "EtWTRABZaYq6iMfeYKouRu166VU2xqa1") return { status: "FAILED", code: "DEVNET_REQUIRED" };
+      if (!await this.devnetAvailable()) return { status: "FAILED", code: "DEVNET_REQUIRED" };
+      const balance = await this.rpc.getBalance(this.signer.address).send({ abortSignal: AbortSignal.timeout(10_000) });
+      if (balance.value < 100_000n) return { status: "FAILED", code: "OPERATOR_UNFUNDED" };
       const { value: block } = await this.rpc.getLatestBlockhash({ commitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(10_000) });
       const message = pipe(createTransactionMessage({ version: 0 }),
         message => setTransactionMessageFeePayerSigner(this.signer!, message),
@@ -38,8 +54,8 @@ export class SolanaCommitments {
       const tx = await signTransactionMessageWithSigners(message);
       const wire = getBase64EncodedWireTransaction(tx);
       const signedSignature = getSignatureFromTransaction(tx);
-      await persistBeforeBroadcast({ transactionSignature: signedSignature, wireTransaction: wire, lastValidBlockHeight: block.lastValidBlockHeight.toString() });
       signature = signedSignature;
+      await persistBeforeBroadcast({ transactionSignature: signedSignature, wireTransaction: wire, lastValidBlockHeight: block.lastValidBlockHeight.toString() });
       await this.rpc.sendTransaction(wire, { encoding: "base64", skipPreflight: false, maxRetries: 2n, preflightCommitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(15_000) });
       return this.reconcile(signature);
     } catch {
@@ -47,10 +63,24 @@ export class SolanaCommitments {
     }
   }
 
+  /** Reuse a previously signed transaction after a process restart; never sign a second memo for the same event. */
+  async resumeSigned(signature: string, wireTransaction: string, lastValidBlockHeight: string): Promise<CommitmentResult> {
+    const known = await this.reconcile(signature);
+    if (known.status !== "PENDING") return known;
+    try {
+      if (!await this.devnetAvailable()) return { status: "PENDING", transactionSignature: signature, code: "DEVNET_UNAVAILABLE" };
+      const blockHeight = await this.rpc.getBlockHeight({ commitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(10_000) });
+      if (blockHeight > BigInt(lastValidBlockHeight)) return { status: "FAILED", transactionSignature: signature, code: "BLOCKHASH_EXPIRED" };
+      await this.rpc.sendTransaction(wireTransaction as ReturnType<typeof getBase64EncodedWireTransaction>,
+        { encoding: "base64", skipPreflight: false, maxRetries: 2n, preflightCommitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(15_000) });
+      return this.reconcile(signature);
+    } catch { return { status: "PENDING", transactionSignature: signature, code: "CONFIRMATION_UNKNOWN" }; }
+  }
+
   async reconcile(signature: string): Promise<CommitmentResult> {
     try {
       if (!/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(signature)) return { status: "FAILED", code: "INVALID_SIGNATURE" };
-      if (await this.rpc.getGenesisHash().send({ abortSignal: AbortSignal.timeout(10_000) }) !== "EtWTRABZaYq6iMfeYKouRu166VU2xqa1") return { status: "FAILED", code: "DEVNET_REQUIRED" };
+      if (!await this.devnetAvailable()) return { status: "FAILED", code: "DEVNET_REQUIRED" };
       const result = (await this.rpc.getSignatureStatuses([parseSignature(signature)], { searchTransactionHistory: true }).send({ abortSignal: AbortSignal.timeout(10_000) })).value[0];
       if (result?.err) return { status: "FAILED", transactionSignature: signature, code: "TRANSACTION_FAILED" };
       return result?.confirmationStatus === "confirmed" || result?.confirmationStatus === "finalized"
