@@ -1,20 +1,26 @@
 {
-  "observedAt": "2026-09-26T20:11:03.844Z",
+  "observedAt": "2026-09-26T22:44:24.809Z",
   "network": "devnet",
   "operatorAddress": "H4TbUH5PahmUdTPPdMbJYcinGsEqcE2KXhdkbki33nU4",
   "proposalOne": {
     "version": 1,
-    "hash": "92ca120f7355db0f949514105b3681e0effdd05b7cdf8ab24cb71301a58d80ee",
-    "commitmentStatus": "FAILED"
+    "hash": "bc8a07f848f467f641ebce500988d909605007dea618783260ce1e4ff3d7cae1",
+    "commitmentStatus": "CONFIRMED",
+    "transactionSignature": "42S9dGsqxAbV48C592SVKqkN7bkEpKJRaixjChYfRbh6QkFYwMuNetdj7HQcK5uxXfsHX659PbuMpKkT79cyeGjy",
+    "explorerUrl": "https://explorer.solana.com/tx/42S9dGsqxAbV48C592SVKqkN7bkEpKJRaixjChYfRbh6QkFYwMuNetdj7HQcK5uxXfsHX659PbuMpKkT79cyeGjy?cluster=devnet",
+    "memoContainsProposalHash": true
   },
   "proposalTwo": {
     "version": 2,
-    "hash": "0ec69874f7f68800a4f38194f59d421b81c9ebfc4592654eeee44cb5da1d4191",
-    "commitmentStatus": "FAILED"
+    "hash": "d8f953fc2ce6443ecfb2ce669af6c16de3be8d7c0afb4f42213aa538968e47da",
+    "commitmentStatus": "CONFIRMED",
+    "transactionSignature": "58cgKj1PCnwUjWJ3nfSsMFxMLGA18yoZ8RCUhiPUQotyp3UEDLnNQimfE1KvNBA9aPcPKKtCrd8fB4KNoi4R3tT9",
+    "explorerUrl": "https://explorer.solana.com/tx/58cgKj1PCnwUjWJ3nfSsMFxMLGA18yoZ8RCUhiPUQotyp3UEDLnNQimfE1KvNBA9aPcPKKtCrd8fB4KNoi4R3tT9?cluster=devnet",
+    "memoContainsProposalHash": true
   },
   "differentHashes": true,
-  "verified": false,
+  "verified": true,
   "devnetAvailable": true,
-  "operatorBalanceLamports": 0,
-  "healthSolana": "DOWN"
+  "operatorBalanceLamports": 999985000,
+  "healthSolana": "UP"
 }

@@ -32,6 +32,20 @@ async function settled(proposalId, cookie) {
   }
   return view.data.proposal;
 }
+async function memoContainsHash(transactionSignature, expectedHash) {
+  const response = await fetch(process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTransaction",
+      params: [transactionSignature, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }] }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const result = await response.json();
+  if (!response.ok || result.error || !result.result || result.result.meta?.err) return false;
+  return result.result.transaction.message.instructions.some(instruction => {
+    if (instruction.program !== "spl-memo" || typeof instruction.parsed !== "string") return false;
+    try { return JSON.parse(instruction.parsed).proposalHash === expectedHash; } catch { return false; }
+  });
+}
 try {
   proof.devnetAvailable = await solana.devnetAvailable();
   const balance = await rpc.getBalance(solana.operatorAddress).send({ abortSignal: AbortSignal.timeout(10_000) });
@@ -54,6 +68,7 @@ try {
   proof.proposalOne = { version: firstView.version, hash: firstView.proposalHash,
     commitmentStatus: firstView.solana.status,
     ...(firstView.solana.status === "CONFIRMED" ? { transactionSignature: firstView.solana.transactionSignature, explorerUrl: firstView.solana.explorerUrl } : {}) };
+  if (firstView.solana.status === "CONFIRMED") proof.proposalOne.memoContainsProposalHash = await memoContainsHash(firstView.solana.transactionSignature, firstView.proposalHash);
   const changed = await call("/merchant/events", "POST", { offerId: firstView.offer.offerId,
     expectedOfferVersion: firstView.offer.offerVersion,
     mutation: { type: "INCREASE_PRICE", newTotalCents: firstView.offer.totalCents + 5_000 } }, cookie);
@@ -64,9 +79,11 @@ try {
   proof.proposalTwo = { version: secondView.version, hash: secondView.proposalHash,
     commitmentStatus: secondView.solana.status,
     ...(secondView.solana.status === "CONFIRMED" ? { transactionSignature: secondView.solana.transactionSignature, explorerUrl: secondView.solana.explorerUrl } : {}) };
+  if (secondView.solana.status === "CONFIRMED") proof.proposalTwo.memoContainsProposalHash = await memoContainsHash(secondView.solana.transactionSignature, secondView.proposalHash);
   proof.differentHashes = firstView.proposalHash !== secondView.proposalHash;
   proof.verified = proof.devnetAvailable && proof.differentHashes && proof.proposalOne.commitmentStatus === "CONFIRMED"
-    && proof.proposalTwo.commitmentStatus === "CONFIRMED";
+    && proof.proposalTwo.commitmentStatus === "CONFIRMED" && proof.proposalOne.memoContainsProposalHash === true
+    && proof.proposalTwo.memoContainsProposalHash === true;
   if (!proof.verified) process.exitCode = 1;
 } catch (error) {
   proof.error = String(error?.message ?? error).slice(0, 200);
