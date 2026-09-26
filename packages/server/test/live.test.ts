@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createApi } from "../src/server.js";
-import { localToInstant } from "../src/stays.js";
+import { LiteApi, localToInstant } from "../src/stays.js";
 
 // Provider responses are controlled here; the live APIs are exercised manually, not in CI.
 const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
@@ -33,7 +33,7 @@ function providers(options: { hotelStepFree?: boolean } = {}) {
 }
 
 async function start(fetcher: typeof fetch) {
-  const app = createApi({ liteApiKey: "test", serpApiKey: "test", staysFetch: fetcher, geminiApiKey: "", geminiModel: "" });
+  const app = createApi({ liteApiKey: "sand_test", serpApiKey: "test", staysFetch: fetcher, geminiApiKey: "", geminiModel: "" });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
@@ -69,6 +69,13 @@ test("converts destination wall-clock times to instants", () => {
   assert.equal(localToInstant("2026-11-16", "11:00 AM", "America/New_York"), "2026-11-16T16:00:00.000Z");
   assert.equal(localToInstant("2026-07-16", "12:00 PM", "America/New_York"), "2026-07-16T16:00:00.000Z");
   assert.equal(localToInstant("2026-07-16", "12:00 AM", "America/New_York"), "2026-07-16T04:00:00.000Z");
+});
+
+test("LiteAPI production or unrecognized keys cannot enter the sandbox booking flow", () => {
+  assert.throws(() => new LiteApi("prod_example"), /LITEAPI_SANDBOX_KEY_REQUIRED/);
+  assert.throws(() => new LiteApi("unknown_example"), /LITEAPI_SANDBOX_KEY_REQUIRED/);
+  assert.doesNotThrow(() => new LiteApi("sand_example"));
+  assert.doesNotThrow(() => new LiteApi("sandbox_example"));
 });
 
 test("live search: real-provider offers are checked privately and booked through the LiteAPI sandbox", async t => {

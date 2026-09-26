@@ -64,7 +64,11 @@ function liteRateSummary(roomType: LiteRoomType) {
 }
 
 export class LiteApi {
-  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch) {}
+  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch) {
+    // This checkout has simulated member payments and a sandbox-only booking
+    // flow. ACC_CREDIT_CARD would charge the account card with a production key.
+    if (!/^(?:sand|sandbox)_/.test(key)) throw new Error("LITEAPI_SANDBOX_KEY_REQUIRED");
+  }
   #headers() { return { "X-API-Key": this.key, "content-type": "application/json", accept: "application/json" }; }
 
   async rates(trip: Trip, filter: { hotelIds?: string[]; limit?: number }) {
