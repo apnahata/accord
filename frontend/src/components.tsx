@@ -31,6 +31,7 @@ export function Stability({ offer }: { offer: PublicOfferDTO }) {
   if (!stability) return null;
   const changes = stability.materialChangeCount;
   const history = (stability.history ?? []).map(point => ({ at: point.at, value: point.totalCents }));
+  if (stability.observationCount < 2) return <div className="stability" title="Accord records every price it sees in Tiger Data."><span><strong>Price tracking started</strong><small>Accord re-checks prices over time; stability appears after the next check.</small></span></div>;
   return <div className={`stability ${stability.label.toLowerCase()}`} title="Observed by Accord over the last 24 hours (Tiger Data). Not a prediction of future prices.">
     <span><strong>{stability.label === 'STABLE' ? 'Stable price' : stability.label === 'MIXED' ? 'Price moved' : 'Volatile price'}</strong> · {changes === 0 ? 'no changes' : `${changes} change${changes === 1 ? '' : 's'}`}{stability.minCents !== undefined && stability.maxCents !== undefined && stability.minCents !== stability.maxCents ? ` · ${money(stability.minCents)}–${money(stability.maxCents)}` : ''}
       <small>{stability.observationCount} price checks in the last 24h{stability.label === 'VOLATILE' ? ' · approve soon or expect a re-check' : ''}</small></span>
