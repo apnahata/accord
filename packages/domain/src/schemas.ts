@@ -2,6 +2,14 @@ import { z } from "zod";
 
 const money = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const instant = z.iso.datetime({ offset: true });
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+export const TRIP_STYLES = ["BEACH", "MOUNTAINS", "SKI", "CITY", "NATURE", "THEME_PARKS", "LAKE"] as const;
+export const TripStyleSchema = z.enum(TRIP_STYLES);
+export type TripStyle = z.infer<typeof TripStyleSchema>;
+/** A stretch of days a member can travel: arrive on or after `from`, leave on or before `to`. */
+export const AvailabilitySchema = z.object({ from: day, to: day }).strict().refine(range => range.to > range.from, "The last day must be after the first day");
+export type Availability = z.infer<typeof AvailabilitySchema>;
 
 /** The only authoritative business input schemas. Frontend and providers import these. */
 export const ConstraintsSchema = z.object({
@@ -10,10 +18,27 @@ export const ConstraintsSchema = z.object({
   requiresFullCashRefund: z.boolean(),
   requiresStepFreeAccess: z.boolean(),
   softPreference: z.string().max(1000),
+  /** Trip-planning answers. Private like everything else here; only anonymous totals ever leave the capsule. */
+  availability: z.array(AvailabilitySchema).max(6).optional(),
+  tripStyles: z.array(TripStyleSchema).max(TRIP_STYLES.length).optional(),
+  placeIdeas: z.string().trim().max(300).optional(),
+  placesToAvoid: z.string().trim().max(300).optional(),
 }).strict();
 export type Constraints = z.infer<typeof ConstraintsSchema>;
 
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** Public planning window for a group that hasn't picked where or when yet. */
+export const TripPlanSchema = z.object({
+  earliest: day,
+  /** The last day the trip may end. */
+  latest: day,
+  nights: z.number().int().min(1).max(14),
+  region: z.enum(["ANY", "EAST", "CENTRAL", "WEST"]).default("ANY"),
+  from: z.string().trim().max(120).optional(),
+  countryCode: z.string().regex(/^[A-Z]{2}$/).default("US"),
+}).strict().refine(plan => plan.latest > plan.earliest, "The window must end after it starts")
+  .refine(plan => (Date.parse(plan.latest) - Date.parse(plan.earliest)) / 86_400_000 >= plan.nights, "The window is shorter than the trip")
+  .refine(plan => (Date.parse(plan.latest) - Date.parse(plan.earliest)) / 86_400_000 <= 120, "Planning windows are limited to 120 days");
+export type TripPlan = z.infer<typeof TripPlanSchema>;
 /** Public trip parameters the host sets. Private limits never go here. */
 export const TripSchema = z.object({
   destination: z.string().trim().min(2).max(120),
@@ -90,6 +115,10 @@ export const ExtractionSchema = z.object({
     maxContributionCents: money.optional(), latestCheckOutAt: instant.optional(),
     requiresFullCashRefund: z.boolean().optional(), requiresStepFreeAccess: z.boolean().optional(),
     softPreferences: z.array(z.object({ kind: z.enum(["LOWEST_PRICE", "WALKABLE", "NEAR_ACTIVITIES", "QUIET"]), weight: z.number().min(0).max(1) })).optional(),
+    availability: z.array(z.object({ from: day, to: day }).strict()).max(6).optional(),
+    tripStyles: z.array(TripStyleSchema).max(TRIP_STYLES.length).optional(),
+    placeIdeas: z.string().max(300).optional(),
+    placesToAvoid: z.string().max(300).optional(),
   }).strict(),
   privacy: z.object({ reasonPrivate: z.boolean() }).strict(),
   unsupportedHardRequirements: z.array(z.object({ rawText: z.string(), reason: z.string() }).strict()),

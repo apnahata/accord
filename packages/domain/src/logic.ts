@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Constraints, MerchantMutation, Offer } from "./schemas.js";
+import type { Availability, Constraints, MerchantMutation, Offer, TripPlan } from "./schemas.js";
 import { OfferSchema } from "./schemas.js";
 
 export function equalShares(totalCents: number, memberIds: readonly string[]) {
@@ -9,10 +9,27 @@ export function equalShares(totalCents: number, memberIds: readonly string[]) {
   return Object.fromEntries(ids.map((id, index) => [id, base + Number(index < remainder)]));
 }
 
-export type Check = { kind: "BUDGET" | "CHECKOUT" | "REFUND" | "STEP_FREE" | "CAPACITY" | "AVAILABLE" | "EXPIRED"; label: string; status: "PASS" | "FAIL" | "UNKNOWN"; privateExplanation: string };
-export function checkMember(offer: Offer, constraints: Constraints, contributionCents: number, memberCount: number, now = new Date()): Check[] {
+/** Calendar day (YYYY-MM-DD) of an instant in the given time zone. */
+export function localDay(instant: string, timeZone = "America/New_York") {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(instant));
+}
+export function addDays(day: string, days: number) {
+  const [y, m, d] = day.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+export const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+export const fitsAvailability = (availability: readonly Availability[] | undefined, checkIn: string, checkOut: string) =>
+  !availability?.length || availability.some(range => range.from <= checkIn && checkOut <= range.to);
+
+export type Check = { kind: "BUDGET" | "CHECKOUT" | "REFUND" | "STEP_FREE" | "CAPACITY" | "AVAILABLE" | "EXPIRED" | "DATES"; label: string; status: "PASS" | "FAIL" | "UNKNOWN"; privateExplanation: string };
+export function checkMember(offer: Offer, constraints: Constraints, contributionCents: number, memberCount: number, now = new Date(), timeZone = "America/New_York"): Check[] {
   const cents = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
-  return [
+  const dates: Check[] = constraints.availability?.length ? [(() => {
+    const ok = fitsAvailability(constraints.availability, localDay(offer.checkInAt, timeZone), localDay(offer.checkOutAt, timeZone));
+    return { kind: "DATES" as const, label: "Your dates", status: ok ? "PASS" as const : "FAIL" as const,
+      privateExplanation: ok ? "The stay falls within the dates you said you can travel." : "The stay falls outside the dates you said you can travel." };
+  })()] : [];
+  return [...dates,
     { kind: "BUDGET", label: "Your contribution", status: contributionCents <= constraints.maxContributionCents ? "PASS" : "FAIL", privateExplanation: contributionCents <= constraints.maxContributionCents ? `Your ${cents(contributionCents)} share is within your confirmed maximum.` : `Your ${cents(contributionCents)} share exceeds your confirmed maximum of ${cents(constraints.maxContributionCents)}.` },
     { kind: "CHECKOUT", label: "Latest checkout", status: !constraints.latestCheckOutAt || Date.parse(offer.checkOutAt) <= Date.parse(constraints.latestCheckOutAt) ? "PASS" : "FAIL", privateExplanation: !constraints.latestCheckOutAt || Date.parse(offer.checkOutAt) <= Date.parse(constraints.latestCheckOutAt) ? "Checkout meets your confirmed time." : "Checkout is later than your confirmed latest time." },
     { kind: "REFUND", label: "Full cash refund", status: !constraints.requiresFullCashRefund || (offer.cancellationPolicyCode === "FULL_CASH_REFUND" && !!offer.fullRefundDeadline && Date.parse(offer.fullRefundDeadline) > now.getTime()) ? "PASS" : "FAIL", privateExplanation: !constraints.requiresFullCashRefund ? "You did not require a full cash refund." : offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "The full cash refund requirement is satisfied." : "This offer no longer provides the full cash refund you required." },
@@ -29,8 +46,8 @@ export function assessOffer(offer: Offer, members: readonly { id: string; constr
   return { shares, checks, feasible: members.length > 0 && Object.values(checks).every(items => items.every(item => item.status === "PASS")) };
 }
 
-export type NearMiss = { memberId: string; offerId: string; offerVersion: string; check: "BUDGET" | "REFUND" | "CHECKOUT"; shareCents: number; gapCents?: number };
-const negotiable = new Set<Check["kind"]>(["BUDGET", "REFUND", "CHECKOUT"]);
+export type NearMiss = { memberId: string; offerId: string; offerVersion: string; check: "BUDGET" | "REFUND" | "CHECKOUT" | "DATES"; shareCents: number; gapCents?: number };
+const negotiable = new Set<Check["kind"]>(["BUDGET", "REFUND", "CHECKOUT", "DATES"]);
 
 /**
  * Offers blocked by exactly one member on exactly one check that member could choose to relax.
@@ -54,6 +71,30 @@ export function nearMisses(offers: readonly Offer[], members: readonly { id: str
     if (!previous || candidate.shareCents < previous.shareCents) best.set(memberId, candidate);
   }
   return [...best.values()];
+}
+
+export type DateWindow = { checkIn: string; checkOut: string };
+/**
+ * Every trip-length window inside the plan, split into windows everyone can make and windows exactly one
+ * member can't. Members who gave no dates are free throughout. Picks up to `limit` non-overlapping
+ * shared windows, earliest first; near windows name the one member who would need to adjust.
+ */
+export function dateWindows(plan: Pick<TripPlan, "earliest" | "latest" | "nights">, members: readonly { id: string; constraints: Pick<Constraints, "availability"> }[], limit = 2) {
+  const shared: DateWindow[] = [], near: Array<DateWindow & { memberId: string }> = [];
+  for (let checkIn = plan.earliest; addDays(checkIn, plan.nights) <= plan.latest; checkIn = addDays(checkIn, 1)) {
+    const window = { checkIn, checkOut: addDays(checkIn, plan.nights) };
+    const blocked = members.filter(member => !fitsAvailability(member.constraints.availability, window.checkIn, window.checkOut));
+    if (!blocked.length) shared.push(window);
+    else if (blocked.length === 1 && members.length > 1) near.push({ ...window, memberId: blocked[0]!.id });
+  }
+  const picked: DateWindow[] = [];
+  for (const window of shared) {
+    if (picked.length >= limit) break;
+    if (picked.every(other => window.checkIn >= other.checkOut || window.checkOut <= other.checkIn)) picked.push(window);
+  }
+  const nearest = new Map<string, DateWindow & { memberId: string }>();
+  for (const window of near) if (!nearest.has(window.memberId)) nearest.set(window.memberId, window);
+  return { windows: picked, sharedCount: shared.length, near: [...nearest.values()] };
 }
 
 export function canonicalize(value: unknown): string {
