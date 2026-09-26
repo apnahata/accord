@@ -229,7 +229,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   let persistence: MongoPersistence | undefined;
   if (process.env.MONGODB_URI) {
     if (!process.env.ACCORD_ENCRYPTION_KEY) throw new Error("ACCORD_ENCRYPTION_KEY is required when MONGODB_URI is set");
-    persistence = await MongoPersistence.connect(process.env.MONGODB_URI, process.env.MONGODB_DB ?? "accord", process.env.ACCORD_ENCRYPTION_KEY);
+    try { persistence = await MongoPersistence.connect(process.env.MONGODB_URI, process.env.MONGODB_DB ?? "accord", process.env.ACCORD_ENCRYPTION_KEY); }
+    catch (error) {
+      process.stderr.write(`\nCould not connect to MongoDB (${(error as Error).name}).\n` +
+        "If you use Atlas, your current IP is probably not allowed: Atlas → Security → Network Access → Add IP Address.\n" +
+        "To run without Mongo (state in memory only), start with MONGODB_URI set to an empty value.\n\n");
+      process.exit(1);
+    }
   }
   const { server, state } = createApi({ persistence });
   await state.ready;
