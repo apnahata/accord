@@ -33,6 +33,8 @@ const codeCopy: Record<string, string> = {
   HOST_CANNOT_LEAVE: 'The host can’t leave the group.',
   ALREADY_BOOKED: 'This group has already booked.',
   TRIP_IN_PAST: 'Choose trip dates in the future.',
+  NUDGE_NOT_FOUND: 'This message is no longer available.',
+  NUDGE_CLOSED: 'You already answered this, or your requirements changed since. Nothing else was changed.',
   AI_UNAVAILABLE: 'Gemini is unavailable right now. Accord’s verified checks still work; you can use the form or try again later.',
 };
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {

@@ -28,17 +28,18 @@ export function useRoomEvents(roomId?: string) {
   useEffect(() => {
     if (!roomId) return;
     const source = new EventSource(`/api/rooms/${encodeURIComponent(roomId)}/events/stream`, { withCredentials: true });
+    // Carries only this member's own notifications (e.g. private messages from Accord).
+    const personal = new EventSource(`/api/rooms/${encodeURIComponent(roomId)}/me/events/stream`, { withCredentials: true });
     const update = () => setRevision(value => value + 1);
     source.onopen = () => { setConnection('live'); update(); };
     // The backend stream uses named `update` and `resync` events (SSE named
     // events do not fire EventSource.onmessage).
-    source.addEventListener('update', update);
-    source.addEventListener('resync', update);
+    for (const stream of [source, personal]) { stream.addEventListener('update', update); stream.addEventListener('resync', update); }
     source.onerror = () => { setConnection('reconnecting'); update(); };
     // Reconcile even if a tab slept or events were missed; events are invalidation only.
     const timer = window.setInterval(update, 15000);
     window.addEventListener('focus', update);
-    return () => { source.close(); clearInterval(timer); window.removeEventListener('focus', update); };
+    return () => { source.close(); personal.close(); clearInterval(timer); window.removeEventListener('focus', update); };
   }, [roomId]);
   return { revision, connection };
 }

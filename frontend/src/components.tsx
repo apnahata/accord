@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Check, CheckCheck, CircleHelp, ExternalLink, LockKeyhole, MapPin, ShieldCheck, Users, X } from 'lucide-react';
+import { ArrowRight, Check, CheckCheck, CircleHelp, ExternalLink, LockKeyhole, MapPin, ShieldCheck, Sparkles, Users, X } from 'lucide-react';
 import type { EventDTO, PublicOfferDTO, PublicProposalDTO, PublicChange } from './contracts';
 import { date, dateTime, money, safeExplorer } from './api';
 
@@ -49,7 +49,8 @@ export function Integrity({ proposal, previousHash, currentHash }: { proposal: P
 export function Stale({ changes, children }: { changes?: PublicChange[]; children?: ReactNode }) {
   return <section className="stale-panel" role="status"><div className="stale-symbol" aria-hidden="true"><span /><span /></div><p className="eyebrow">Protected by Accord</p><h2>Consent stale</h2><p className="stale-lead">This is no longer the offer the group approved.</p>{!!changes?.length && <dl className="changes">{changes.map((change, i) => <div key={i}><dt>{change.label}</dt><dd><del>{change.before}</del><ArrowRight size={16} /><strong>{change.after}</strong></dd></div>)}</dl>}<p>Accord paused the purchase. The updated offer cannot use the group’s previous authorizations.</p>{children}</section>;
 }
-export function Timeline({ events }: { events: EventDTO[] }) {
-  return <section className="panel"><div className="section-heading"><h3>Coming together</h3><span className="eyebrow">Activity</span></div>{events.length === 0 ? <p className="subtle">Your group’s activity will appear here.</p> : <ol className="timeline">{events.map(event => <li key={event.id}><span className="timeline-dot" /><div><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</time><strong>{event.title}</strong>{event.detail && <p>{event.detail}</p>}</div></li>)}</ol>}</section>;
+export function Timeline({ events, limit = 14 }: { events: EventDTO[]; limit?: number }) {
+  const shown = [...events].reverse().slice(0, limit);
+  return <section className="panel"><div className="section-heading"><h3>Coming together</h3><span className="eyebrow">Latest first</span></div>{events.length === 0 ? <p className="subtle">Your group’s activity will appear here.</p> : <ol className="timeline">{shown.map(event => <li key={event.id} className={event.actor ? `actor-${event.actor.toLowerCase()}` : ''}><span className="timeline-dot" /><div><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}{event.actor === 'ACCORD' && <span className="actor-badge"><Sparkles size={10} />Accord</span>}{event.actor === 'MERCHANT' && <span className="actor-badge merchant">Merchant</span>}</time><strong>{event.title}</strong>{event.detail && <p>{event.detail}</p>}</div></li>)}</ol>}</section>;
 }
 export function CheckStatus({ status }: { status: 'PASS' | 'FAIL' | 'UNKNOWN' }) { return <span className={`check-status ${status.toLowerCase()}`} aria-label={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Does not pass' : 'Unknown'}>{status === 'PASS' ? <Check size={18} /> : status === 'FAIL' ? <X size={18} /> : <CircleHelp size={17} />}</span>; }
