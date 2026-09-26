@@ -13,6 +13,8 @@ type IntakeReply = {
   reply: string;
   constraints?: Constraints;
   requiresConfirmation?: boolean;
+  followUps?: string[];
+  notChecked?: string[];
 };
 
 function localDateInput(value: string) {
@@ -30,6 +32,7 @@ export function Intake() {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState<Constraints>();
+  const [notes, setNotes] = useState<{ followUps: string[]; notChecked: string[] }>({ followUps: [], notChecked: [] });
   const [source, setSource] = useState<'ai' | 'structured'>('ai');
   const [edit, setEdit] = useState<Constraints>();
   const [forceManual, setForceManual] = useState(false);
@@ -47,6 +50,7 @@ export function Intake() {
       if (result.stage === 'REVIEW') {
         if (!result.requiresConfirmation || !result.constraints) throw new Error('Accord did not return a draft for your confirmation.');
         setDraft(result.constraints);
+        setNotes({ followUps: result.followUps ?? [], notChecked: result.notChecked ?? [] });
         setSource('ai');
       }
       setMessages([...next, { role: 'assistant', content: result.reply }]);
@@ -66,6 +70,7 @@ export function Intake() {
       requiresStepFreeAccess: data.get('stepFree') === 'on',
       softPreference: String(data.get('preference') || ''),
     });
+    setNotes({ followUps: [], notChecked: [] });
     setSource('structured');
   }
 
@@ -84,6 +89,8 @@ export function Intake() {
       <BoundaryList constraints={draft} />
       <h3>Your preference</h3>
       <p>{draft.softPreference || 'No preference added'}</p>
+      {source === 'ai' && notes.notChecked.length > 0 && <div className="notice intake-note"><div><strong>Not included in this draft</strong><p>Accord books stays only, so it can’t check these: {notes.notChecked.join('; ')}.</p></div></div>}
+      {source === 'ai' && notes.followUps.length > 0 && <div className="notice intake-note"><div><strong>Optional: you could also tell Accord</strong><ul>{notes.followUps.map(question => <li key={question}>{question}</li>)}</ul><p>Choose “Keep talking” to answer, or confirm as is.</p></div></div>}
       <PrivateNote />
       <p className="fine">These are planning requirements, not permission to spend. You will authorize an exact proposal separately.</p>
       <div className="button-row">
