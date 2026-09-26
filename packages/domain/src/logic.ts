@@ -29,6 +29,33 @@ export function assessOffer(offer: Offer, members: readonly { id: string; constr
   return { shares, checks, feasible: members.length > 0 && Object.values(checks).every(items => items.every(item => item.status === "PASS")) };
 }
 
+export type NearMiss = { memberId: string; offerId: string; offerVersion: string; check: "BUDGET" | "REFUND" | "CHECKOUT"; shareCents: number; gapCents?: number };
+const negotiable = new Set<Check["kind"]>(["BUDGET", "REFUND", "CHECKOUT"]);
+
+/**
+ * Offers blocked by exactly one member on exactly one check that member could choose to relax.
+ * Accessibility needs are never offered for renegotiation. Returns at most one (the cheapest) per member.
+ */
+export function nearMisses(offers: readonly Offer[], members: readonly { id: string; constraints: Constraints }[], now = new Date(), maxBudgetStretch = 0.2): NearMiss[] {
+  const best = new Map<string, NearMiss>();
+  for (const offer of offers) {
+    const { shares, checks } = assessOffer(offer, members, now);
+    const failing = Object.entries(checks).filter(([, items]) => items.some(item => item.status !== "PASS"));
+    if (failing.length !== 1) continue;
+    const [memberId, items] = failing[0]!;
+    const blocked = items.filter(item => item.status !== "PASS");
+    if (blocked.length !== 1 || blocked[0]!.status !== "FAIL" || !negotiable.has(blocked[0]!.kind)) continue;
+    const check = blocked[0]!.kind as NearMiss["check"];
+    const cap = members.find(member => member.id === memberId)!.constraints.maxContributionCents;
+    const share = shares[memberId]!;
+    if (check === "BUDGET" && share > cap * (1 + maxBudgetStretch)) continue;
+    const candidate: NearMiss = { memberId, offerId: offer.offerId, offerVersion: offer.offerVersion, check, shareCents: share, ...(check === "BUDGET" ? { gapCents: share - cap } : {}) };
+    const previous = best.get(memberId);
+    if (!previous || candidate.shareCents < previous.shareCents) best.set(memberId, candidate);
+  }
+  return [...best.values()];
+}
+
 export function canonicalize(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalize(item)}`).join(",")}}`;
