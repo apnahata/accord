@@ -6,6 +6,7 @@ import { MongoMerchantStore } from "../../integrations/src/mongo-merchant.js";
 export type SealedValue = { kid: string; iv: string; tag: string; data: string };
 export type SessionRecord = { roomId: string; memberId: string; createdAt: string };
 export type RoomAggregate = { room: Document; members: Document[]; proposals: Document[] };
+export type Removals = { members: string[]; sessions: string[] };
 export type Snapshot = { rooms: Document[]; members: Document[]; proposals: Document[]; sessions: Document[]; invitations: Document[] };
 
 const coordinatorCollections = ["rooms", "members", "proposals", "sessions", "invitations"] as const;
@@ -71,13 +72,13 @@ export class MongoPersistence {
   }
 
   /** Writes are serialized so a later snapshot can never be overwritten by an earlier one. */
-  save(aggregates: RoomAggregate[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>) {
-    const run = this.#tail.then(() => this.#write(aggregates, sessions, invitations));
+  save(aggregates: RoomAggregate[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>, removed: Removals = { members: [], sessions: [] }) {
+    const run = this.#tail.then(() => this.#write(aggregates, sessions, invitations, removed));
     this.#tail = run.catch(() => undefined);
     return run;
   }
 
-  async #write(aggregates: RoomAggregate[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>) {
+  async #write(aggregates: RoomAggregate[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>, removed: Removals) {
     const upserts = (docs: Document[]): AnyBulkWriteOperation<Document>[] =>
       docs.map(doc => ({ replaceOne: { filter: { _id: doc._id }, replacement: doc, upsert: true } }));
     const writes: Array<[string, AnyBulkWriteOperation<Document>[]]> = [
@@ -91,6 +92,8 @@ export class MongoPersistence {
     try {
       await session.withTransaction(async () => {
         for (const [name, operations] of writes) if (operations.length) await this.#collection(name).bulkWrite(operations, { session, ordered: true });
+        if (removed.members.length) await this.#collection("members").deleteMany({ _id: { $in: removed.members } } as Document, { session });
+        if (removed.sessions.length) await this.#collection("sessions").deleteMany({ _id: { $in: removed.sessions } } as Document, { session });
       }, { writeConcern: { w: "majority" }, maxCommitTimeMS: 10_000 });
     } finally { await session.endSession(); }
   }

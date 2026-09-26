@@ -91,7 +91,12 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         const route = roomMatch[2] ?? "";
         const session = sessionRequired(state, request);
         const { room, member } = state.requireRoom(roomId, session);
-        if (route === "" && method === "GET") { await send(200, state.roomDTO(room)); return; }
+        if (route === "" && method === "GET") { await send(200, state.roomDTO(room, member.id)); return; }
+        const removeMatch = /^members\/([^/]+)$/.exec(route);
+        if (removeMatch && method === "DELETE") {
+          state.removeMember(room, member, roomParam(removeMatch[1]!));
+          await send(200, state.roomDTO(room, member.id)); return;
+        }
         if (route === "invites" && method === "POST") { await send(200, { inviteToken: room.inviteToken }); return; }
         if (route === "me/constraints" && method === "GET") { await send(200, { displayName: member.displayName, constraints: member.constraints, confirmedAt: member.confirmedAt }); return; }
         if (route === "me/constraints" && method === "POST") {

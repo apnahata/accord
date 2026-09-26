@@ -4,6 +4,9 @@ export type PublicRoomDTO = {
   id: string; name: string; goal: string;
   status: 'COLLECTING' | 'SEARCHING' | 'PROPOSAL_ACTIVE' | 'STALE' | 'BOOKED';
   memberCount: number; readyMemberCount: number; activeProposalId?: string;
+  /** Names and confirmation status only; requirements themselves are never included. */
+  members: Array<{ id: string; displayName: string; ready: boolean; isHost: boolean; isYou: boolean }>;
+  viewerIsHost: boolean;
 };
 export type PublicOfferDTO = {
   offerId: string; offerVersion: string; merchantName: string; propertyName: string;
