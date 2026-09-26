@@ -1,0 +1,52 @@
+{
+  "observedAt": "2026-09-26T19:27:01.803Z",
+  "scenario": "Four synthetic member sessions using real stay-provider APIs",
+  "trip": {
+    "destination": "Miami, FL",
+    "checkIn": "2026-11-10",
+    "checkOut": "2026-11-14",
+    "guests": 4
+  },
+  "search": {
+    "status": "VERIFIED",
+    "observedAt": "2026-09-26T19:36:47.085Z",
+    "httpStatus": 200,
+    "liteApiOffers": 28,
+    "googleHotelsOffers": 10,
+    "externalHandoffLinks": 10,
+    "feasibleOffers": 38,
+    "recommendedSource": "LITEAPI",
+    "providerEvents": [
+      "LiteAPI: 28 bookable hotel rates.",
+      "Google Hotels: 10 vacation rentals."
+    ]
+  },
+  "booking": {
+    "status": "VERIFIED",
+    "offerName": "Sheraton Miami Airport Hotel and Executive Meeting Center",
+    "totalCents": 57042,
+    "offerVersion": "v1",
+    "proposalHash": "24c9ffa87b22eb2d7d519d64fd4a207f4204df62ff44dc583bd805536b5f865b",
+    "authorizationMode": "SIMULATED",
+    "httpStatus": 200,
+    "bookingReference": "gdBAdCtbs",
+    "retryReturnedSameReference": true,
+    "providerLookup": {
+      "httpStatus": 200,
+      "bookingIdMatches": true,
+      "status": "CONFIRMED",
+      "sandbox": 1,
+      "priceCents": 57042,
+      "currency": "USD"
+    }
+  },
+  "handoff": {
+    "status": "VERIFIED",
+    "observedAt": "2026-09-26T19:38:54.199Z",
+    "httpStatus": 200,
+    "receiptStatus": "HANDOFF",
+    "linkHost": "reservations.hostepm.com",
+    "authorizationMode": "SIMULATED",
+    "bookingOccurred": false
+  }
+}

@@ -193,6 +193,14 @@ function freeCancellationDeadline(trip: Trip, price: any) {
 
 function mapGoogle(trip: Trip, property: any, now: Date): LiveStay | undefined {
   if (property?.type !== "vacation rental" || !property?.property_token) return undefined;
+  // A search-only rental must lead somewhere the host can complete checkout.
+  // SerpApi often returns property details without a public booking link.
+  let externalUrl: string;
+  try {
+    const link = new URL(property.link);
+    if (link.protocol !== "https:" || link.username || link.password || link.searchParams.has("api_key")) return undefined;
+    externalUrl = link.toString();
+  } catch { return undefined; }
   const total = Number(property.total_rate?.extracted_lowest);
   const sleeps = Number(/Sleeps (\d+)/i.exec((property.essential_info ?? []).join(", "))?.[1] ?? 0);
   if (!Number.isFinite(total) || total <= 0 || sleeps < trip.guests) return undefined;
@@ -219,7 +227,7 @@ function mapGoogle(trip: Trip, property: any, now: Date): LiveStay | undefined {
       expiresAt: new Date(Math.min(now.getTime() + OFFER_TTL_MS, Date.parse(localToInstant(trip.checkIn, "12:00 AM", trip.timeZone)))).toISOString(),
       walkable: Number(property.location_rating ?? 0) >= 4.2 || walkable.length >= 2,
       nearActivities: walkable.length >= 1, quiet: false,
-      source: "GOOGLE_HOTELS", bookingMode: "EXTERNAL", externalUrl: typeof property.link === "string" ? property.link : undefined,
+      source: "GOOGLE_HOTELS", bookingMode: "EXTERNAL", externalUrl,
       imageUrl: property.images?.[0]?.thumbnail, rating: typeof property.overall_rating === "number" ? Math.round(property.overall_rating * 20) / 10 : undefined,
       reviewCount: typeof property.reviews === "number" ? property.reviews : undefined,
     });

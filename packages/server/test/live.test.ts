@@ -23,10 +23,11 @@ function providers(options: { hotelStepFree?: boolean } = {}) {
       poi: [{ name: "Beach", distanceKm: 0.5, importance: "major" }], sentiment_analysis: { pros: ["Great location"], cons: ["Small rooms"], categories: [{ name: "Location", rating: 9.5 }] } } });
     if (url.includes("/rates/prebook")) return json({ data: { prebookId: "PB1", price: state.refundableCents / 100, currency: "USD", cancellationChanged: false } });
     if (url.includes("/rates/book")) { calls.book++; assert.equal(JSON.parse(String(init?.body)).payment.method, "ACC_CREDIT_CARD"); return json({ data: { bookingId: "BK1", status: "CONFIRMED", price: state.refundableCents / 100 } }); }
-    if (url.includes("serpapi.com")) { calls.serp++; return json({ properties: [{ type: "vacation rental", property_token: "tok1", name: "Beach House", link: "https://example.com/beach-house",
+    if (url.includes("serpapi.com")) { calls.serp++; const rental = { type: "vacation rental", property_token: "tok1", name: "Beach House", link: "https://example.com/beach-house",
       total_rate: { extracted_lowest: 1000 }, essential_info: ["Entire house", "Sleeps 6", "3 bedrooms"], check_in_time: "4:00 PM", check_out_time: "10:00 AM",
       prices: [{ source: "ExampleStays", free_cancellation: true, free_cancellation_until_date: monthDay(40), free_cancellation_until_time: "11:59 PM" }],
-      amenities: ["Wheelchair accessible", "Pool"], excluded_amenities: [], nearby_places: [{ name: "Pier", transportations: [{ type: "Walking", duration: "5 min" }] }], overall_rating: 4.8, reviews: 40 }] }); }
+      amenities: ["Wheelchair accessible", "Pool"], excluded_amenities: [], nearby_places: [{ name: "Pier", transportations: [{ type: "Walking", duration: "5 min" }] }], overall_rating: 4.8, reviews: 40 };
+      return json({ properties: [rental, { ...rental, property_token: "tok2", name: "Rental with no booking link", link: undefined }] }); }
     throw new Error(`Unexpected request ${url}`);
   }) as typeof fetch;
   return { fetcher, calls, state };
