@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assessOffer, demoCatalog, equalShares, proposalHash, checkMember } from "../src/index.js";
+import { assessOffer, demoCatalog, equalShares, proposalHash, checkMember, nearMisses } from "../src/index.js";
+
+test("near misses name only a sole blocker, never renegotiate accessibility, and cap how far a budget is stretched", () => {
+  const [miami, tampa] = demoCatalog();
+  const open = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "" };
+  const others = [{ id: "b", constraints: { ...open, maxContributionCents: 90000 } }, { id: "c", constraints: { ...open, maxContributionCents: 90000 } }, { id: "d", constraints: { ...open, maxContributionCents: 90000 } }];
+  assert.deepEqual(nearMisses([miami!, tampa!], [{ id: "a", constraints: { ...open, maxContributionCents: 27000 } }, ...others]),
+    [{ memberId: "a", offerId: "tampa-river-court", offerVersion: "v1", check: "BUDGET", shareCents: 28000, gapCents: 1000 }]);
+  assert.deepEqual(nearMisses([tampa!], [{ id: "a", constraints: { ...open, maxContributionCents: 20000 } }, ...others]), []);
+  assert.deepEqual(nearMisses([{ ...tampa!, stepFreeVerified: false }], [{ id: "a", constraints: { ...open, maxContributionCents: 90000, requiresStepFreeAccess: true } }, ...others]), []);
+  assert.deepEqual(nearMisses([tampa!], [{ id: "a", constraints: { ...open, maxContributionCents: 27000 } }, { id: "b", constraints: { ...open, maxContributionCents: 27000 } }, ...others.slice(1)]), []);
+});
 
 test("equal shares preserve cents and canonical member order", () => {
   assert.deepEqual(equalShares(120001, ["d", "b", "a", "c"]), { a: 30001, b: 30000, c: 30000, d: 30000 });
