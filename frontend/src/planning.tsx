@@ -26,7 +26,9 @@ export function PlanningBoard({ room, base, onChange, invite }: { room: PublicRo
     <h2>{title}</h2>
     {planning.stage === 'COLLECTING' && <>
       <p>{planning.answered} of {planning.total} have answered. Each person privately tells Accord when they can go, what kind of trip they’d love, and what they can spend. Accord plans on its own once everyone has answered.</p>
-      <div className="button-row"><LinkButton to={`${base}/me/intake`}>Answer privately</LinkButton></div>
+      <div className="button-row">{room.members.find(member => member.isYou)?.ready
+        ? <LinkButton to={`${base}/me/intake`} secondary>Review my answers</LinkButton>
+        : <LinkButton to={`${base}/me/intake`}>Answer privately</LinkButton>}</div>
       {invite}
     </>}
     {planning.stage === 'PLANNING' && <><p>Accord is overlapping everyone’s dates, picking destinations, and checking stays against everyone’s requirements.</p><Loading /></>}
@@ -71,7 +73,7 @@ export function DecidedTrip({ room, base, onChange }: { room: PublicRoomDTO; bas
   return <section className="panel decided-trip">
     <div className="section-heading"><p className="eyebrow"><Compass size={13} />Where and when</p><Tag><Check size={13} />Decided</Tag></div>
     <h3>{winner.destination} · {dayRange(winner.checkIn, winner.checkOut)}</h3>
-    <p className="subtle">{how} Accord now watches this trip’s stays and replans within it if anything changes.</p>
+    <p className="subtle">{how}{room.status !== 'BOOKED' && ' Accord now watches this trip’s stays and replans within it if anything changes.'}</p>
     {planning.options.length > 1 && <details><summary>See the shortlist</summary><PlanningResults planning={planning} /></details>}
     {room.viewerIsHost && room.status !== 'BOOKED' && (confirming
       ? <div className="button-row"><Button className="secondary small" disabled={action.busy} onClick={() => action.run(async () => { await post(`${base}/plan/reopen`, { confirmed: true }); setConfirming(false); onChange(); })}>Yes, plan again</Button><Button className="secondary small" onClick={() => setConfirming(false)}>Cancel</Button><span className="fine">Everyone’s approvals are cancelled, and Accord plans again with everyone’s current answers.</span></div>
