@@ -43,6 +43,11 @@ test("room, private constraints, consent and booking survive a coordinator resta
     const joined = await api.call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName });
     cookies[displayName] = joined.response.headers.get("set-cookie")!.split(";")[0]!;
   }
+  await api.call(`/invites/${created.data.inviteToken}/join`, "POST", { displayName: "Ghost" });
+  const ghost = (await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data.members.find((m: any) => m.displayName === "Ghost");
+  assert.equal((await api.call(`/rooms/${roomId}/members/${ghost.id}`, "DELETE", undefined, cookies.Alex)).response.status, 200);
+  assert.equal(await raw.db(dbName).collection("members").countDocuments({ _id: ghost.id } as any), 0);
+  assert.equal(await raw.db(dbName).collection("sessions").countDocuments({ memberId: ghost.id }), 0);
   for (const [displayName, cookie] of Object.entries(cookies)) {
     const confirmed = await api.call(`/rooms/${roomId}/me/constraints`, "POST", {
       maxContributionCents: displayName === "Alex" ? 35000 : 45000, requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "lowest reasonable price", confirmed: true }, cookie);

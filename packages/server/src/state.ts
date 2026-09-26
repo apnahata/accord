@@ -65,6 +65,8 @@ export class AccordState {
   #dirtyRooms = new Set<string>();
   #dirtySessions = new Set<string>();
   #dirtyInvitations = new Set<string>();
+  #removedMembers = new Set<string>();
+  #removedSessions = new Set<string>();
 
   /** Without persistence, state is process memory only. With Mongo, memory is a write-through working copy. */
   constructor(readonly persistence?: MongoPersistence) {
@@ -118,13 +120,29 @@ export class AccordState {
     if (member.id !== room.hostId) throw new AppError(403, "ADMIN_ACCESS_DENIED");
     return { room, member };
   }
-  roomDTO(room: Room): PublicRoomDTO {
+  roomDTO(room: Room, viewerId: string): PublicRoomDTO {
     const proposal = room.activeProposalId ? this.proposals.get(room.activeProposalId) : undefined;
     return { id: room.id, name: room.name, goal: room.goal,
       status: room.booking ? "BOOKED" : proposal?.state === "STALE" ? "STALE" : proposal ? "PROPOSAL_ACTIVE" : "COLLECTING",
       memberCount: room.memberIds.length,
       readyMemberCount: room.memberIds.filter(id => this.members.get(id)?.constraints).length,
-      activeProposalId: room.activeProposalId };
+      activeProposalId: room.activeProposalId,
+      members: room.memberIds.map(id => { const member = this.members.get(id)!;
+        return { id, displayName: member.displayName, ready: Boolean(member.constraints), isHost: id === room.hostId, isYou: id === viewerId }; }),
+      viewerIsHost: viewerId === room.hostId };
+  }
+  /** Host-only. Only members who have not confirmed requirements can be removed; their sessions are revoked. */
+  removeMember(room: Room, host: Member, memberId: string) {
+    if (host.id !== room.hostId) throw new AppError(403, "ADMIN_ACCESS_DENIED");
+    const target = room.memberIds.includes(memberId) ? this.members.get(memberId) : undefined;
+    if (!target) throw new AppError(404, "MEMBER_NOT_FOUND");
+    if (target.id === room.hostId) throw new AppError(409, "CANNOT_REMOVE_HOST");
+    if (target.constraints) throw new AppError(409, "MEMBER_ALREADY_READY");
+    room.memberIds = room.memberIds.filter(id => id !== memberId);
+    this.members.delete(memberId); this.#removedMembers.add(memberId);
+    for (const [id, session] of this.sessions) if (session.memberId === memberId) { this.sessions.delete(id); this.#dirtySessions.delete(id); this.#removedSessions.add(id); }
+    this.stale(room, "The member set changed.");
+    this.emit(room, "MEMBER_REMOVED", "The host removed a member who hadn’t confirmed requirements.");
   }
   confirmConstraints(room: Room, member: Member, constraints: Constraints) {
     member.constraints = structuredClone(constraints); member.capsuleVersion++; member.confirmedAt = nowIso();
@@ -347,16 +365,18 @@ export class AccordState {
   /** Persists everything changed since the last flush in one Mongo transaction. No-op in memory mode. */
   async flush() {
     const rooms = [...this.#dirtyRooms], sessions = [...this.#dirtySessions], invitations = [...this.#dirtyInvitations];
-    this.#dirtyRooms.clear(); this.#dirtySessions.clear(); this.#dirtyInvitations.clear();
-    if (!this.persistence || (!rooms.length && !sessions.length && !invitations.length)) return;
+    const removed = { members: [...this.#removedMembers], sessions: [...this.#removedSessions] };
+    this.#dirtyRooms.clear(); this.#dirtySessions.clear(); this.#dirtyInvitations.clear(); this.#removedMembers.clear(); this.#removedSessions.clear();
+    if (!this.persistence || (!rooms.length && !sessions.length && !invitations.length && !removed.members.length && !removed.sessions.length)) return;
     try {
       await this.persistence.save(
         rooms.map(id => this.rooms.get(id)).filter((room): room is Room => Boolean(room)).map(room => this.#aggregate(room)),
         sessions.flatMap(id => { const value = this.sessions.get(id); return value ? [{ id, value }] : []; }),
-        invitations.flatMap(id => { const roomId = this.invitations.get(id); return roomId ? [{ id, roomId }] : []; }));
+        invitations.flatMap(id => { const roomId = this.invitations.get(id); return roomId ? [{ id, roomId }] : []; }), removed);
     } catch {
       // Keep them dirty so the next flush retries; the caller reports the failure.
       rooms.forEach(id => this.#dirtyRooms.add(id)); sessions.forEach(id => this.#dirtySessions.add(id)); invitations.forEach(id => this.#dirtyInvitations.add(id));
+      removed.members.forEach(id => this.#removedMembers.add(id)); removed.sessions.forEach(id => this.#removedSessions.add(id));
       throw new AppError(503, "PERSISTENCE_UNAVAILABLE");
     }
   }
