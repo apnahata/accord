@@ -1,9 +1,10 @@
 import {
-  assessOffer, checkMember, ConstraintsSchema, equalShares, nearMisses,
+  assessOffer, checkMember, ConstraintsSchema, equalShares, localDay, nearMisses,
   type AutopilotDTO, type Constraints, type NearMiss, type Offer,
 } from "@accord/domain";
 import { AppError } from "./errors.js";
-import type { AccordState, InboxEntry, Proposal, Room } from "./state.js";
+import { Planner } from "./planner.js";
+import { dayRange, isLive, type AccordState, type InboxEntry, type Proposal, type Room } from "./state.js";
 
 export type AutopilotOptions = {
   enabled?: boolean;
@@ -16,6 +17,8 @@ export type AutopilotOptions = {
   remindAfterMs?: number;
   expiryWarningMs?: number;
   maxNudgesPerMember?: number;
+  /** How long a trip vote stays open before Accord closes it with the votes cast. */
+  voteWindowMs?: number;
 };
 export type AlternativesInput = {
   destination: string; countryCode: string; checkIn: string; checkOut: string; guests: number;
@@ -24,7 +27,7 @@ export type AlternativesInput = {
   staysFailing: Record<string, number>;
 };
 type Trigger = "READY" | "REPLAN";
-type Transient = { status: "SEARCHING" | "REPLANNING" | "WIDENING"; message: string };
+type Transient = { status: "SEARCHING" | "REPLANNING" | "WIDENING" | "PLANNING"; message: string };
 
 const ACCORD = { actor: "ACCORD" as const };
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
@@ -38,6 +41,7 @@ const isActive = (proposal?: Proposal) => proposal?.state === "OPEN" || proposal
  */
 export class Coordinator {
   readonly options: Required<AutopilotOptions>;
+  readonly planner: Planner;
   #timers = new Map<string, NodeJS.Timeout>();
   #locks = new Map<string, Promise<unknown>>();
   #transient = new Map<string, Transient>();
@@ -47,7 +51,9 @@ export class Coordinator {
 
   constructor(private readonly state: AccordState, options: AutopilotOptions = {}) {
     this.options = { enabled: true, readyDelayMs: 1200, replanDelayMs: 2500, watchIntervalMs: 20_000, recheckEveryMs: 120_000,
-      remindAfterMs: 180_000, expiryWarningMs: 24 * 60 * 60 * 1000, maxNudgesPerMember: 3, ...options };
+      remindAfterMs: 180_000, expiryWarningMs: 24 * 60 * 60 * 1000, maxNudgesPerMember: 3, voteWindowMs: 24 * 60 * 60 * 1000, ...options };
+    this.planner = new Planner(state, { voteWindowMs: this.options.voteWindowMs, maxNudgesPerMember: this.options.maxNudgesPerMember,
+      nudge: room => this.#nudge(room), propose: room => this.#propose(room) });
     if (this.options.enabled && this.options.watchIntervalMs > 0) {
       this.#watch = setInterval(() => void this.tick(), this.options.watchIntervalMs);
       this.#watch.unref();
@@ -91,10 +97,14 @@ export class Coordinator {
       return;
     }
     if (trigger === "READY" && this.#timers.has(room.id)) return;
-    this.#transient.set(room.id, trigger === "REPLAN"
+    const planning = this.planner.needsPlanning(room);
+    if (planning && this.planner.current(room)) return;
+    this.#transient.set(room.id, planning ? { status: "PLANNING", message: "Everyone has answered. Accord is working out where and when." }
+      : trigger === "REPLAN"
       ? { status: "REPLANNING", message: "The offer changed, so Accord is looking for another option that works for everyone." }
       : { status: "SEARCHING", message: "Everyone is ready. Accord is starting the search." });
-    if (trigger === "READY") this.state.emit(room, "AUTOPILOT_READY", "Everyone has confirmed. Accord is starting the search on its own.", undefined, ACCORD);
+    if (planning) this.state.emit(room, "AUTOPILOT_READY", "Everyone has answered. Accord is working out where and when on its own.", undefined, ACCORD);
+    else if (trigger === "READY") this.state.emit(room, "AUTOPILOT_READY", "Everyone has confirmed. Accord is starting the search on its own.", undefined, ACCORD);
     clearTimeout(this.#timers.get(room.id));
     const timer = setTimeout(() => void this.#advance(room.id, trigger), trigger === "REPLAN" ? this.options.replanDelayMs : this.options.readyDelayMs);
     timer.unref();
@@ -109,6 +119,7 @@ export class Coordinator {
     try {
       await this.#lock(roomId, async () => {
         if (this.#disposed || !this.#wantsProposal(room)) return;
+        if (this.planner.needsPlanning(room)) { await this.planner.plan(room); return; }
         const fingerprint = await this.#fingerprint(room);
         if (room.noOption?.fingerprint === fingerprint) return;
         const result = await this.state.solve(room, trigger);
@@ -122,6 +133,29 @@ export class Coordinator {
       this.#transient.delete(roomId);
       await this.state.flush().catch(() => undefined);
     }
+  }
+
+  /** A member asked Accord to plan now (autopilot off, or retrying after a failure). */
+  async planNow(room: Room) {
+    clearTimeout(this.#timers.get(room.id)); this.#timers.delete(room.id);
+    if (!this.state.readyMembers(room)) throw new AppError(409, "MEMBERS_NOT_READY");
+    if (room.memberIds.length < 2) throw new AppError(409, "MEMBERS_NOT_READY");
+    try { await this.#lock(room.id, () => this.planner.plan(room)); }
+    finally { this.#transient.delete(room.id); }
+  }
+
+  async vote(room: Room, memberId: string, optionId: string) {
+    await this.#lock(room.id, async () => {
+      if (this.planner.vote(room, memberId, optionId)) await this.planner.closeVote(room, "VOTE");
+    });
+  }
+
+  /** The decided trip's first proposal, chosen from the stays already found for it. */
+  async #propose(room: Room) {
+    const fingerprint = await this.#fingerprint(room);
+    const result = await this.state.solve(room, "READY", { search: false });
+    if ("noSolution" in result) await this.#noSolution(room, fingerprint);
+    else delete room.noOption;
   }
 
   /** A member asked Accord to search now. Shares the room lock so it never races an autonomous search. */
@@ -141,7 +175,7 @@ export class Coordinator {
 
   /** Nothing fits: first look further afield, then privately ask only members who alone block an option. */
   async #noSolution(room: Room, fingerprint: string) {
-    if (room.trip && this.state.providers.suggestAlternatives && room.widenedFor !== fingerprint) {
+    if (room.trip && isLive(room) && this.state.providers.suggestAlternatives && room.widenedFor !== fingerprint) {
       room.widenedFor = fingerprint;
       const destination = room.trip.destination;
       this.#transient.set(room.id, { status: "WIDENING", message: `Nothing in ${destination} works for everyone yet, so Accord is checking nearby areas.` });
@@ -221,6 +255,7 @@ export class Coordinator {
     const current = member.constraints, nudge = entry.nudge;
     const next: Constraints = nudge.check === "BUDGET" ? { ...current, maxContributionCents: Math.max(current.maxContributionCents, nudge.shareCents) }
       : nudge.check === "REFUND" ? { ...current, requiresFullCashRefund: false }
+      : nudge.check === "DATES" ? { ...current, availability: [...(current.availability ?? []), { from: nudge.window!.checkIn, to: nudge.window!.checkOut }].slice(-6) }
       : { ...current, latestCheckOutAt: nudge.checkOutAt! };
     nudge.status = "ACCEPTED";
     this.state.confirmConstraints(room, member, ConstraintsSchema.parse(next));
@@ -241,7 +276,7 @@ export class Coordinator {
       for (const id of group) {
         const constraints = this.state.members.get(id)!.constraints!;
         const personal = checkMember(current, constraints, shares[id]!, room.memberIds.length)
-          .filter(check => check.status !== "PASS" && ["BUDGET", "REFUND", "CHECKOUT", "STEP_FREE"].includes(check.kind));
+          .filter(check => check.status !== "PASS" && ["BUDGET", "REFUND", "CHECKOUT", "STEP_FREE", "DATES"].includes(check.kind));
         this.state.notify(room, id, personal.length
           ? { kind: "STALE_REASON", proposalId: proposal.id, title: `${current.propertyName} no longer works for you`,
               body: `${personal.map(check => check.privateExplanation).join(" ")} Your earlier approval won’t be used, and Accord won’t ask the group to change anything for you. It is already looking for another option.` }
@@ -260,7 +295,8 @@ export class Coordinator {
 
   /** A merchant change can make a previously impossible trip possible again. */
   onOfferChanged(room: Room) {
-    if (room.noOption) this.kick(room, "REPLAN");
+    if (this.planner.needsPlanning(room) && room.planning?.stage === "NO_OPTION") { delete room.planning; this.kick(room, "READY"); }
+    else if (room.noOption) this.kick(room, "REPLAN");
   }
 
   describe(room: Room): AutopilotDTO {
@@ -272,6 +308,15 @@ export class Coordinator {
     const proposal = room.activeProposalId ? this.state.proposals.get(room.activeProposalId) : undefined;
     if (isActive(proposal)) return { status: "WATCHING", message: "Accord is watching this offer while everyone decides. If anything changes, it cancels old approvals and looks again." };
     const ready = room.memberIds.filter(id => this.state.members.get(id)?.constraints).length;
+    if (this.planner.needsPlanning(room)) {
+      if (room.memberIds.length < 2) return { status: "WAITING_FOR_MEMBERS", message: "Accord starts planning once your friends join and answer a few private questions." };
+      if (ready < room.memberIds.length) return { status: "WAITING_FOR_MEMBERS", message: `Accord plans on its own once everyone has answered (${ready} of ${room.memberIds.length} done).` };
+      const planning = this.planner.current(room);
+      if (planning?.stage === "VOTING") return { status: "VOTING", message: `${Object.keys(planning.votes).length} of ${room.memberIds.length} have voted. Accord picks the trip once everyone has, or when voting closes ${wallTime(planning.voteClosesAt!, "America/New_York")}.` };
+      if (planning?.stage === "NO_OPTION") return { status: "NO_OPTION", message: planning.message };
+      if (planning?.stage === "PLANNING") return { status: "PLANNING", message: planning.message };
+      return { status: "IDLE", message: "Accord is ready to plan." };
+    }
     if (room.memberIds.length < 2) return { status: "WAITING_FOR_MEMBERS", message: "Accord starts searching once your friends join and confirm their requirements." };
     if (ready < room.memberIds.length) return { status: "WAITING_FOR_MEMBERS", message: `Accord searches on its own once everyone has confirmed (${ready} of ${room.memberIds.length} ready).` };
     if (room.noOption) return { status: "NO_OPTION", message: room.noOption.message };
@@ -285,6 +330,11 @@ export class Coordinator {
     try {
       await this.state.ready;
       for (const room of this.state.rooms.values()) {
+        const planning = room.planning;
+        if (planning?.stage === "VOTING" && Date.parse(planning.voteClosesAt!) <= now) {
+          await this.#lock(room.id, () => this.planner.closeVote(room, "DEADLINE")).catch(() => undefined);
+          continue;
+        }
         const proposal = room.activeProposalId ? this.state.proposals.get(room.activeProposalId) : undefined;
         if (!proposal || room.booking || !isActive(proposal)) continue;
         await this.#lock(room.id, () => this.#watchProposal(room, proposal, now)).catch(() => undefined);
@@ -321,9 +371,12 @@ export class Coordinator {
 }
 
 function nudgeEntry(offer: Offer, miss: NearMiss, constraints: Constraints, timeZone: string): Omit<InboxEntry, "id" | "at"> {
+  const window = { checkIn: localDay(offer.checkInAt, timeZone), checkOut: localDay(offer.checkOutAt, timeZone) };
   const nudge = { status: "OPEN" as const, check: miss.check, offerId: offer.offerId, offerVersion: offer.offerVersion, shareCents: miss.shareCents,
-    ...(miss.check === "CHECKOUT" ? { checkOutAt: offer.checkOutAt } : {}) };
+    ...(miss.check === "CHECKOUT" ? { checkOutAt: offer.checkOutAt } : {}), ...(miss.check === "DATES" ? { window } : {}) };
   const closing = "No one else will see what you choose, and Accord will keep looking either way.";
+  if (miss.check === "DATES") return { kind: "NUDGE", nudge, title: "One stay works for everyone but falls outside your dates",
+    body: `${offer.propertyName} in ${offer.city} works for everyone else for ${dayRange(window)}. You can add those dates for this trip, or keep your dates. ${closing}` };
   if (miss.check === "BUDGET") return { kind: "NUDGE", nudge, title: "One stay is just above your limit",
     body: `${offer.propertyName} in ${offer.city} works for everyone else. Your share would be ${money(miss.shareCents)}, which is ${money(miss.gapCents!)} over your ${money(constraints.maxContributionCents)} limit. You can raise your limit to ${money(miss.shareCents)} for this trip, or keep it. ${closing}` };
   if (miss.check === "REFUND") return { kind: "NUDGE", nudge, title: "One stay has a different refund policy",
