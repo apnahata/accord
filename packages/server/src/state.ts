@@ -10,6 +10,7 @@ import {
 import { Merchant, type MerchantContract } from "../../integrations/src/merchant.js";
 import { RoomStreams } from "../../integrations/src/realtime.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
+import { SESSION_TTL_SECONDS, type MongoPersistence, type RoomAggregate, type SealedValue, type SessionRecord } from "./persistence.js";
 
 export class AppError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
@@ -43,22 +44,33 @@ const merchantContract: MerchantContract<Offer, MerchantMutation, MerchantEvent>
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const nowIso = () => new Date().toISOString();
+type MerchantBackend = {
+  transaction: MemoryMerchantStore<Offer, MerchantEvent>["transaction"];
+  drain(deliver: (id: string, event: MerchantEvent) => Promise<void>): Promise<number>;
+};
 const inventoryLabel = "Controlled synthetic demo merchant inventory — no real accommodation is reserved";
 
 export class AccordState {
   readonly rooms = new Map<string, Room>();
   readonly members = new Map<string, Member>();
   readonly proposals = new Map<string, Proposal>();
-  readonly sessions = new Map<string, { roomId: string; memberId: string }>();
+  readonly sessions = new Map<string, SessionRecord>();
   readonly invitations = new Map<string, string>();
-  readonly store = new MemoryMerchantStore<Offer, MerchantEvent>();
-  readonly merchant = new Merchant(this.store, merchantContract);
+  readonly store: MerchantBackend;
+  readonly merchant: Merchant<Offer, MerchantMutation, MerchantEvent>;
   readonly catalogIds = demoCatalog().map(offer => offer.offerId);
-  readonly ready = this.merchant.seed(demoCatalog());
+  readonly ready: Promise<void>;
   readonly streams: RoomStreams<z.infer<typeof PublicEventSchema>, z.infer<typeof PrivateEventSchema>>;
   #mutationTail: Promise<void> = Promise.resolve();
+  #dirtyRooms = new Set<string>();
+  #dirtySessions = new Set<string>();
+  #dirtyInvitations = new Set<string>();
 
-  constructor() {
+  /** Without persistence, state is process memory only. With Mongo, memory is a write-through working copy. */
+  constructor(readonly persistence?: MongoPersistence) {
+    this.store = persistence ? persistence.merchantStore as MerchantBackend : new MemoryMerchantStore<Offer, MerchantEvent>();
+    const merchant = this.merchant = new Merchant(this.store, merchantContract);
+    this.ready = (async () => { if (persistence) await this.#hydrate(); await merchant.seed(demoCatalog()); })();
     this.streams = new RoomStreams(PublicEventSchema, PrivateEventSchema, async request => {
       const session = this.sessionFromCookie(request.headers.cookie);
       return session ? { roomId: session.roomId, memberId: session.memberId } : null;
@@ -66,14 +78,15 @@ export class AccordState {
   }
   sessionFromCookie(cookie?: string) {
     const value = cookie?.split(";").map(part => part.trim()).find(part => part.startsWith("accord_session="))?.slice("accord_session=".length);
-    return value ? this.sessions.get(hashToken(value)) : undefined;
+    const session = value ? this.sessions.get(hashToken(value)) : undefined;
+    return session && Date.parse(session.createdAt) + SESSION_TTL_SECONDS * 1000 > Date.now() ? session : undefined;
   }
   createRoom(name: string, goal: string, displayName: string) {
     const roomId = randomUUID(), memberId = randomUUID(), inviteToken = token(), sessionToken = token();
     const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [] };
-    this.rooms.set(roomId, room); this.invitations.set(hashToken(inviteToken), roomId);
+    this.rooms.set(roomId, room); this.#addInvitation(hashToken(inviteToken), roomId);
     this.members.set(memberId, { id: memberId, roomId, displayName, constraints: null, capsuleVersion: 0 });
-    this.sessions.set(hashToken(sessionToken), { roomId, memberId });
+    this.#addSession(hashToken(sessionToken), roomId, memberId);
     this.emit(room, "MEMBER_JOINED", "One member joined the room.");
     return { roomId, inviteToken, sessionToken };
   }
@@ -89,7 +102,7 @@ export class AccordState {
     const memberId = randomUUID(), sessionToken = token();
     this.members.set(memberId, { id: memberId, roomId: room.id, displayName, constraints: null, capsuleVersion: 0 });
     room.memberIds.push(memberId);
-    this.sessions.set(hashToken(sessionToken), { roomId: room.id, memberId });
+    this.#addSession(hashToken(sessionToken), room.id, memberId);
     this.stale(room, "The member set changed.");
     this.emit(room, "MEMBER_JOINED", "A member joined the room.");
     return { roomId: room.id, sessionToken };
@@ -125,7 +138,12 @@ export class AccordState {
   }
   async allOffers(): Promise<Offer[]> {
     await this.ready;
-    return this.store.transaction(async tx => (await Promise.all(this.catalogIds.map(id => tx.getOffer(id)))).map(record => record!.offer));
+    // Sequential: Mongo transactions do not support concurrent operations on one session.
+    return this.store.transaction(async tx => {
+      const offers: Offer[] = [];
+      for (const id of this.catalogIds) offers.push((await tx.getOffer(id))!.offer);
+      return offers;
+    });
   }
   private confirmed(room: Room) {
     const members = room.memberIds.map(id => this.members.get(id)!);
@@ -255,7 +273,7 @@ export class AccordState {
     try { booking = await this.merchant.execute({ offerId: current.offerId, expectedOfferVersion: current.offerVersion, idempotencyKey: key }); }
     catch { throw new AppError(409, "MERCHANT_BOOKING_FAILED"); }
     room.booking = { reference: booking.bookingReference, confirmedAt: booking.confirmedAt, proposalId: proposal.id };
-    proposal.state = "BOOKED";
+    proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
     try { await this.store.drain(async (_eventId, event) => { if (event.type === "BOOKING_CONFIRMED") this.emit(room, "BOOKING_CONFIRMED", "One controlled demo booking was confirmed.", proposal.id); }); }
     catch { /* Booking is confirmed. A failed optional event fanout cannot erase the receipt. */ }
     return this.receipt(room);
@@ -301,11 +319,64 @@ export class AccordState {
   }
   emit(room: Room, type: string, title: string, proposalId?: string) {
     const event: EventDTO = { id: randomUUID(), occurredAt: nowIso(), title };
-    room.events.push(event);
+    room.events.push(event); this.#dirtyRooms.add(room.id);
     this.streams.publishPublic(room.id, event.id, { roomId: room.id, type, proposalId, at: event.occurredAt });
   }
-  reset() {
-    this.rooms.clear(); this.members.clear(); this.proposals.clear(); this.sessions.clear(); this.invitations.clear();
-    // Store reset requires a fresh application instance; avoid claiming inventory is restored here.
+  #addSession(id: string, roomId: string, memberId: string) {
+    this.sessions.set(id, { roomId, memberId, createdAt: nowIso() }); this.#dirtySessions.add(id);
+  }
+  #addInvitation(id: string, roomId: string) {
+    this.invitations.set(id, roomId); this.#dirtyInvitations.add(id);
+  }
+  #aggregate(room: Room): RoomAggregate {
+    const sealer = this.persistence!.sealer;
+    const { id, events, ...rest } = room;
+    return {
+      room: { _id: id, ...structuredClone(rest), events: events.slice(-200) },
+      members: room.memberIds.map(memberId => {
+        const { id: _id, constraints, ...fields } = this.members.get(memberId)!;
+        return { _id, ...fields, sealedConstraints: constraints ? sealer.seal(constraints) : null };
+      }),
+      proposals: [...this.proposals.values()].filter(proposal => proposal.roomId === room.id).map(proposal => ({
+        _id: proposal.id, roomId: proposal.roomId, version: proposal.version, hash: proposal.hash, state: proposal.state,
+        snapshot: structuredClone(proposal.snapshot),
+        approvals: Object.fromEntries(proposal.approvals), authorizations: Object.fromEntries(proposal.authorizations),
+      })),
+    };
+  }
+  /** Persists everything changed since the last flush in one Mongo transaction. No-op in memory mode. */
+  async flush() {
+    const rooms = [...this.#dirtyRooms], sessions = [...this.#dirtySessions], invitations = [...this.#dirtyInvitations];
+    this.#dirtyRooms.clear(); this.#dirtySessions.clear(); this.#dirtyInvitations.clear();
+    if (!this.persistence || (!rooms.length && !sessions.length && !invitations.length)) return;
+    try {
+      await this.persistence.save(
+        rooms.map(id => this.rooms.get(id)).filter((room): room is Room => Boolean(room)).map(room => this.#aggregate(room)),
+        sessions.flatMap(id => { const value = this.sessions.get(id); return value ? [{ id, value }] : []; }),
+        invitations.flatMap(id => { const roomId = this.invitations.get(id); return roomId ? [{ id, roomId }] : []; }));
+    } catch {
+      // Keep them dirty so the next flush retries; the caller reports the failure.
+      rooms.forEach(id => this.#dirtyRooms.add(id)); sessions.forEach(id => this.#dirtySessions.add(id)); invitations.forEach(id => this.#dirtyInvitations.add(id));
+      throw new AppError(503, "PERSISTENCE_UNAVAILABLE");
+    }
+  }
+  async #hydrate() {
+    const sealer = this.persistence!.sealer;
+    const data = await this.persistence!.load();
+    for (const doc of data.rooms) {
+      const { _id, ...rest } = doc;
+      this.rooms.set(String(_id), { ...(rest as Omit<Room, "id">), id: String(_id) });
+    }
+    for (const doc of data.members) {
+      const { _id, sealedConstraints, ...rest } = doc;
+      this.members.set(String(_id), { ...(rest as Omit<Member, "id" | "constraints">), id: String(_id),
+        constraints: sealedConstraints ? sealer.open<Constraints>(sealedConstraints as SealedValue) : null });
+    }
+    for (const doc of data.proposals) {
+      this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state,
+        snapshot: doc.snapshot, approvals: new Map(Object.entries(doc.approvals ?? {})), authorizations: new Map(Object.entries(doc.authorizations ?? {})) });
+    }
+    for (const doc of data.sessions) this.sessions.set(String(doc._id), { roomId: doc.roomId, memberId: doc.memberId, createdAt: new Date(doc.createdAt).toISOString() });
+    for (const doc of data.invitations) this.invitations.set(String(doc._id), doc.roomId);
   }
 }
