@@ -9,3 +9,4 @@ coverage/
 *-keypair.json
 test-results/
 playwright-report/
+*.env

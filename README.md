@@ -4,7 +4,7 @@ Accord helps groups plan and purchase a shared stay while keeping each member's 
 
 ## Run the local demo
 
-Requirements: Node 22 and npm. The local API uses process memory; restarting it resets rooms, sessions, approvals, merchant mutations and bookings. All listings and payment authorizations are explicitly simulated. No external account is required for the local core flow.
+Requirements: Node 22 and npm. Without `MONGODB_URI` the local API uses process memory, and restarting it resets rooms, sessions, approvals, merchant mutations and bookings. `npm run dev:api` reads a root `.env` file if present (see [MongoDB persistence](#mongodb-persistence)). All listings and payment authorizations are explicitly simulated. No external account is required for the local core flow.
 
 ```sh
 npm ci
@@ -21,6 +21,18 @@ Open the Vite URL shown in the terminal. It proxies `/api` to `http://localhost:
 
 Create a group as Alex, open the invite in three separate browser profiles, and join as Priya, Jordan and Mateo. Confirm the brief's private constraints. Solve to see the $1,200 Miami demo stay. All four members approve and authorize their **simulated** $300 shares. From Alex's authenticated merchant console, increase Miami to $1,440. The old consent becomes stale; Alex privately sees that the new $360 share exceeds his $350 cap. Replan to the $1,120 Tampa demo stay, get four fresh $280 authorizations, and book once. The receipt clearly says no card was charged and no real accommodation was reserved.
 
+## MongoDB persistence
+
+Set these in a root `.env` (gitignored) to keep all coordinator state in MongoDB Atlas:
+
+```sh
+MONGODB_URI=mongodb+srv://USER:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=accord
+ACCORD_ENCRYPTION_KEY=   # 32 random bytes, base64
+```
+
+Rooms, members, sessions, invitations, proposals, approvals, authorizations, bookings and merchant inventory are then stored in Atlas and reloaded on restart. Private constraints are stored only as AES-256-GCM ciphertext. The process keeps an in-memory working copy and writes every change in one Mongo transaction before responding, so run exactly one API process. `/api/health` reports `mongo: UP` after a live ping. `npm run test:mongo` runs a restart-recovery test against a throwaway database on that cluster. The demo reset endpoint deletes all stored rooms and merchant changes.
+
 ## Verify
 
 ```sh
@@ -36,6 +48,6 @@ The core test exercises four separate authenticated HTTP sessions and the stale-
 - `packages/domain` owns validated constraints, merchant mutation schema, deterministic feasibility, equal shares, proposal hashes and shared frontend DTO types. The frontend imports its types from this package.
 - `packages/server` owns sessions, authenticated API routes, room/proposal state and the local simulated booking flow. It binds the merchant and SSE adapters from `packages/integrations`.
 - `packages/integrations` contains provider and merchant transports. Optional sponsor services stay unavailable until configured and proven live.
-- `deploy` contains a Vultr-ready template, not an actual deployment. It requires a real integrated image, Mongo-backed operational state, host and DNS before a production claim. The current local API reports Mongo as `UNCONFIGURED` and deliberately fails the deployment readiness gate.
+- `deploy` contains a Vultr-ready template, not an actual deployment. It requires a real integrated image, `MONGODB_URI`/`ACCORD_ENCRYPTION_KEY`, host and DNS before a production claim. Without Mongo configured the API reports `UNCONFIGURED` and deliberately fails the deployment readiness gate.
 
-Current operational state is process-local. A Mongo-backed room, session, proposal and consent repository is required before reliable hosted operation. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. Gemini intake can be configured with `GEMINI_API_KEY` and `GEMINI_MODEL`, but no real call has been made here. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.
+Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. Gemini intake can be configured with `GEMINI_API_KEY` and `GEMINI_MODEL`, but no real call has been made here. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.

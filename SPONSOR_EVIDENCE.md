@@ -166,14 +166,14 @@ This ledger records verified proof only. A configured adapter, local synthetic t
 
 - **Challenge:** Not treated as a sponsor submission.
 - **Official requirement:** Not applicable/verified.
-- **Credentials/account:** No Mongo connection configured.
-- **Feature:** Future durable operational state for hosted use.
+- **Credentials/account:** Atlas cluster configured locally via gitignored `.env` (not committed).
+- **Feature:** Durable operational state: rooms, members, sessions, invitations, proposals, approvals, authorizations, bookings and merchant inventory/outbox.
 - **Why Accord needs it:** Persist current rooms, consent and merchant state under backend access controls.
-- **Implementation:** `MongoMerchantStore` exists in `packages/integrations/src/mongo-merchant.ts` but is not wired; room/member/proposal/consent/booking state remains process-memory in `packages/server/src/state.ts`.
-- **Code path:** `/api/health` reports `mongo: UNCONFIGURED`.
-- **Live proof:** None.
+- **Implementation:** `packages/server/src/persistence.ts` (transactional write-through, AES-256-GCM sealed constraints, session TTL index) and `MongoMerchantStore`, wired in `packages/server/src/state.ts`.
+- **Code path:** `/api/health` pings Mongo and reports `UP`/`DOWN`; every API response is sent only after its state changes commit.
+- **Live proof:** `npm run test:mongo` passed against the Atlas cluster: four sessions, encrypted constraints, consent, two coordinator restarts and one booking recovered from Mongo. Not yet demonstrated on a hosted deployment.
 - **Screenshot:** None.
 - **Transaction/query/reference:** None.
 - **Failure behavior:** Health gate requires Mongo before deployment readiness; actual execution must fail closed in backend.
-- **Known limitations:** No operational repositories, credentials, indexes, restart recovery or multi-session persistence proof.
+- **Known limitations:** Single coordinator process only (in-memory working copy, process-local SSE). Encryption key lives in an environment variable, not a KMS.
 - **Submission status:** Not verified.
