@@ -4,7 +4,7 @@ Accord helps groups plan and purchase a shared stay while keeping each member's 
 
 ## Run the local demo
 
-Requirements: Node 22 and npm. Without `MONGODB_URI` the local API uses process memory, and restarting it resets rooms, sessions, approvals, merchant mutations and bookings. `npm run dev:api` reads a root `.env` file if present (see [MongoDB persistence](#mongodb-persistence)). All listings and payment authorizations are explicitly simulated. No external account is required for the local core flow.
+Requirements: Node 22 and npm. Without `MONGODB_URI` the local API uses process memory, and restarting it resets rooms, sessions, approvals, merchant mutations and bookings. `npm run dev:api` reads a root `.env` file if present (see [MongoDB persistence](#mongodb-persistence)). The unconfigured core demo uses simulated listings and payment authorizations. No external account is required for that flow.
 
 ```sh
 npm ci
