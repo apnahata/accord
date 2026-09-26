@@ -43,6 +43,8 @@ node --test tools/infra/test/*.test.mjs
 
 The core tests exercise four separate authenticated HTTP sessions, the stale-to-booked flow, and a multi-turn intake with a fake model response. They do not prove four browser UIs, a live model, or a deployed service. The infrastructure test exercises a synthetic localhost SSE server. Provider adapter tests use controlled responses, not live sponsor credentials.
 
+For a live Gemini intake smoke test, set `GEMINI_API_KEY` and `GEMINI_MODEL=gemini-3.5-flash-lite` in the gitignored root `.env`, then run `npm run verify:gemini -- --record`. It calls Gemini through the local Accord API with synthetic member text, checks the review draft and no-save-before-confirmation rule, and writes a sanitized result to `sponsor-evidence/gemini-live-smoke.json`. A provider error or incorrect draft makes the command fail.
+
 ## Ownership and limitations
 
 - `packages/domain` owns validated constraints, merchant mutation schema, deterministic feasibility, equal shares, proposal hashes and shared frontend DTO types. The frontend imports its types from this package.
@@ -50,4 +52,4 @@ The core tests exercise four separate authenticated HTTP sessions, the stale-to-
 - `packages/integrations` contains provider and merchant transports. Optional sponsor services stay unavailable until configured and proven live.
 - `deploy` contains a Vultr-ready template, not an actual deployment. It requires a real integrated image, `MONGODB_URI`/`ACCORD_ENCRYPTION_KEY`, host and DNS before a production claim. Without Mongo configured the API reports `UNCONFIGURED` and deliberately fails the deployment readiness gate.
 
-Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. Gemini intake can be configured with `GEMINI_API_KEY` and `GEMINI_MODEL`, but no real call has been made here. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.
+Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. One live local Gemini intake call has been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.

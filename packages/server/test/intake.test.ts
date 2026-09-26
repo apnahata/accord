@@ -21,7 +21,7 @@ test("private multi-turn AI intake asks a functional question and never saves be
         unsupportedHardRequirements: [],
         ambiguities: [{ field: "latestCheckOutAt", question: "Which calendar date is the Sunday you need to leave by noon?" }],
       } : {
-        proposed: { maxContributionCents: 35000, latestCheckOutAt: "2027-03-14T16:00:00.000Z" },
+        proposed: { maxContributionCents: 35000, latestCheckOutAt: "2027-03-14T12:00:00-05:00" },
         privacy: { reasonPrivate: true },
         unsupportedHardRequirements: [],
         ambiguities: [],

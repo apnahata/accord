@@ -8,6 +8,7 @@ import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 import { MongoPersistence } from "./persistence.js";
+import { normalizeModelCheckout } from "./model-time.js";
 
 const name = z.string().trim().min(1).max(100);
 const roomIdPattern = /^\/api\/rooms\/([^/]+)(?:\/(.*))?$/;
@@ -108,16 +109,23 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
           const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), messages: z.array(message) }).strict(), output: ExtractionSchema },
             { roomGoal: room.goal, timeZone: "America/New_York", messages },
-            "Interpret the full private conversation about a shared stay. The latest member answer may revise an earlier one. Extract only supported functional constraints. Ask one concise functional clarification when a requirement is ambiguous. Never infer a private reason or a maximum contribution. Resolve relative dates only when the supplied goal or conversation establishes the exact date; otherwise ask which date. If statements conflict, ask rather than guessing. The result is an unconfirmed draft, never permission to spend.");
+            "Read the full private stay conversation. Extract an EXPLICIT personal spending maximum into maxContributionCents: $350 means 35000 cents; never omit an explicit maximum and never invent a missing one. The supported hard fields are maximum contribution, latest checkout date/time, full cash refund, and verified step-free access. A stated checkout date/time belongs in latestCheckOutAt. A walkable/quiet/near-activities/low-price wish is a soft preference, not an unsupported hard requirement. Only list a hard requirement as unsupported when none of the supported fields can represent it. Ask one concise functional clarification only when a stated requirement is genuinely ambiguous. Resolve relative dates only from supplied dates; otherwise ask for the calendar date. Express latestCheckOutAt as the requested checkout WALL CLOCK in America/New_York with a numeric offset, for example 2027-03-14T12:00:00-04:00. NEVER return a Z/UTC timestamp; the backend will verify and normalize the Eastern offset. If the member gives another timezone, convert its wall time to equivalent Eastern wall time first. The latest member answer may revise earlier statements. Never infer a private reason. This is an unconfirmed draft, never permission to spend.");
           if (result.status !== "OK") throw new AppError(503, "AI_UNAVAILABLE");
           const extraction = result.value.data;
           if (extraction.unsupportedHardRequirements.length || extraction.ambiguities.length) {
             await send(200, { stage: "CLARIFYING", reply: extraction.ambiguities[0]?.question ?? "I can't verify one of those requirements for a stay yet. Can you describe the functional requirement another way?" }); return;
           }
           if (extraction.proposed.maxContributionCents === undefined) { await send(200, { stage: "CLARIFYING", reply: "What is the most you would personally contribute to this stay?" }); return; }
+          let latestCheckOutAt: string | undefined;
+          try {
+            latestCheckOutAt = extraction.proposed.latestCheckOutAt
+              ? normalizeModelCheckout(extraction.proposed.latestCheckOutAt) : undefined;
+          } catch {
+            await send(200, { stage: "CLARIFYING", reply: "Please confirm the exact checkout date and time in Eastern Time." }); return;
+          }
           const constraints = ConstraintsSchema.parse({
             maxContributionCents: extraction.proposed.maxContributionCents,
-            latestCheckOutAt: extraction.proposed.latestCheckOutAt,
+            latestCheckOutAt,
             requiresFullCashRefund: extraction.proposed.requiresFullCashRefund ?? false,
             requiresStepFreeAccess: extraction.proposed.requiresStepFreeAccess ?? false,
             softPreference: extraction.proposed.softPreferences?.map(item => item.kind.toLowerCase().replaceAll("_", " ")).join(", ") ?? "",
