@@ -1,0 +1,23 @@
+{
+  "baseUrl": "https://YOUR_REAL_ACCORD_HOST",
+  "healthPath": "/api/health",
+  "timeoutMs": 30000,
+  "sessions": [
+    { "name": "Alex", "eventsPath": "/api/rooms/REPLACE_WITH_ROOM_ID/events/stream", "headers": { "Cookie": "accord_session=REPLACE_WITH_ALEX_SESSION" } },
+    { "name": "Priya", "eventsPath": "/api/rooms/REPLACE_WITH_ROOM_ID/events/stream", "headers": { "Cookie": "accord_session=REPLACE_WITH_PRIYA_SESSION" } },
+    { "name": "Jordan", "eventsPath": "/api/rooms/REPLACE_WITH_ROOM_ID/events/stream", "headers": { "Cookie": "accord_session=REPLACE_WITH_JORDAN_SESSION" } },
+    { "name": "Mateo", "eventsPath": "/api/rooms/REPLACE_WITH_ROOM_ID/events/stream", "headers": { "Cookie": "accord_session=REPLACE_WITH_MATEO_SESSION" } }
+  ],
+  "expected": {
+    "event": "update",
+    "field": "type",
+    "value": "PROPOSAL_STALE",
+    "where": { "proposalId": "REPLACE_WITH_CURRENT_PROPOSAL_ID" }
+  },
+  "trigger": {
+    "path": "/api/merchant/events",
+    "method": "POST",
+    "headers": { "Cookie": "accord_session=REPLACE_WITH_HOST_SESSION" },
+    "body": { "offerId": "miami-ocean-walk", "expectedOfferVersion": "REPLACE_WITH_CURRENT_OFFER_VERSION", "mutation": { "type": "INCREASE_PRICE", "newTotalCents": 144000 } }
+  }
+}

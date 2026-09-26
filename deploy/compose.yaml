@@ -1,0 +1,33 @@
+# Template only. ACCORD_IMAGE must be the integrated backend image, not this library.
+services:
+  accord:
+    image: ${ACCORD_IMAGE:?Set the built backend image digest}
+    env_file: ${ACCORD_ENV_FILE:-.env}
+    restart: unless-stopped
+    init: true
+    expose: ["3000"]
+    volumes:
+      - ./check-health.mjs:/opt/accord-infra/check-health.mjs:ro
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    # Exactly one process/replica while using process-local merchant and SSE state.
+    healthcheck:
+      test: ["CMD", "node", "/opt/accord-infra/check-health.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      ACCORD_DOMAIN: ${ACCORD_DOMAIN:?Set the real deployed hostname}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [accord]
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,32 @@
+{
+  "name": "@accord/integrations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx --test test/*.test.ts",
+    "migrate:tiger": "tsx scripts/migrate-tiger.ts"
+  },
+  "dependencies": {
+    "@solana/kit": "^8.3.0",
+    "mongodb": "^6.20.0",
+    "pg": "^8.16.3"
+  },
+  "peerDependencies": { "zod": "^4.1.11" },
+  "devDependencies": {
+    "@types/node": "^22.18.6",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "zod": "^4.1.11"
+  }
+}
