@@ -26,7 +26,14 @@ const codeCopy: Record<string, string> = {
   CANNOT_REMOVE_HOST: 'The host can’t be removed from the group.',
   MEMBER_NOT_FOUND: 'This member is no longer in the group.',
   ADMIN_ACCESS_DENIED: 'Only the group host can do that.',
-  AI_UNAVAILABLE: 'Gemini is unavailable right now. Accord’s verified checks still work; please try the explanation again later.',
+  PROPOSAL_STALE: 'Something changed since this was approved: the price, the terms, or the group. Previous approvals can’t be used. Review the latest state.',
+  STAY_SEARCH_UNAVAILABLE: 'Live stay search isn’t configured on this server.',
+  STAY_SEARCH_FAILED: 'The live stay providers didn’t respond. Please try again in a moment.',
+  BOOKING_PROVIDER_UNAVAILABLE: 'The booking provider couldn’t be reached, so nothing was booked. Please try again.',
+  HOST_CANNOT_LEAVE: 'The host can’t leave the group.',
+  ALREADY_BOOKED: 'This group has already booked.',
+  TRIP_IN_PAST: 'Choose trip dates in the future.',
+  AI_UNAVAILABLE: 'Gemini is unavailable right now. Accord’s verified checks still work; you can use the form or try again later.',
 };
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;

@@ -3,11 +3,12 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema, equalShares } from "@accord/domain";
+import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema, TripSchema, equalShares } from "@accord/domain";
 import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 import { MongoPersistence } from "./persistence.js";
+import { GoogleHotels, LiteApi } from "./stays.js";
 import { normalizeModelCheckout } from "./model-time.js";
 import { triageExtraction } from "./intake.js";
 import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
@@ -57,11 +58,22 @@ async function serveFrontend(path: string, response: ServerResponse) {
   } catch { throw new AppError(404, "FRONTEND_NOT_BUILT"); }
 }
 
-export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence } = {}) {
+export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence;
+  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch } = {}) {
   const persistence = options.persistence;
-  let state = new AccordState(persistence);
   const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
+  const liteApiKey = options.liteApiKey ?? process.env.LITEAPI_KEY, serpApiKey = options.serpApiKey ?? process.env.SERPAPI_KEY;
+  const providers = {
+    ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch) } : {}),
+    ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch) } : {}),
+    ...(aiConfigured ? { summarize: async (facts: unknown) => {
+      const result = await model.generate({ input: z.unknown(), output: z.object({ summary: z.string().max(400) }).strict() }, facts,
+        "Write one or two plain sentences (max 45 words) telling a group of friends what this stay is like, using only the supplied public listing facts. No names of group members, no budgets, no invented facts, no marketing language.");
+      return result.status === "OK" ? result.value.data.summary : undefined;
+    } } : {}),
+  };
+  let state = new AccordState(persistence, providers);
   const server = createServer(async (request, response) => {
     // Nothing is acknowledged to a client until the changes it caused are durable.
     const send = async (status: number, body: unknown) => { await state.flush(); json(response, status, body); };
@@ -69,14 +81,17 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       const method = request.method ?? "GET";
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (method === "GET" && path === "/api/health") {
-        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "DOWN" : "UNCONFIGURED", tiger: "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
+        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "DOWN" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", tiger: "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
       }
       if (method === "GET" && path === "/api/capabilities") {
         await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: false } }); return;
       }
       if (method === "POST" && path === "/api/rooms") {
-        const input = z.object({ name, goal: z.string().trim().min(1).max(500), displayName: z.string().trim().min(1).max(60) }).strict().parse(await readJson(request));
-        const result = state.createRoom(input.name, input.goal, input.displayName);
+        const input = z.object({ name, goal: z.string().trim().max(500).optional(), displayName: z.string().trim().min(1).max(60), trip: TripSchema.optional() }).strict().parse(await readJson(request));
+        if (input.trip && Date.parse(input.trip.checkIn) < Date.now() - 86_400_000) throw new AppError(422, "TRIP_IN_PAST");
+        const goal = input.goal || (input.trip ? `A shared stay in ${input.trip.destination} for ${input.trip.guests}, ${input.trip.checkIn} to ${input.trip.checkOut}.` : "");
+        if (!goal) throw new AppError(422, "VALIDATION_FAILED");
+        const result = state.createRoom(input.name, goal, input.displayName, input.trip);
         response.setHeader("set-cookie", sessionCookie(result.sessionToken, request));
         await send(201, { roomId: result.roomId, inviteToken: result.inviteToken }); return;
       }
@@ -102,6 +117,11 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           await send(200, state.roomDTO(room, member.id)); return;
         }
         if (route === "invites" && method === "POST") { await send(200, { inviteToken: room.inviteToken }); return; }
+        if (route === "me/leave" && method === "POST") {
+          state.leave(room, member);
+          response.setHeader("set-cookie", "accord_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+          await send(200, { left: true }); return;
+        }
         if (route === "me/constraints" && method === "GET") { await send(200, { displayName: member.displayName, constraints: member.constraints, confirmedAt: member.confirmedAt }); return; }
         if (route === "me/constraints" && method === "POST") {
           const input = z.object({ confirmed: z.literal(true) }).extend(ConstraintsSchema.shape).strict().parse(await readJson(request));
@@ -172,7 +192,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         const id = roomParam(proposalMatch[1]!), route = proposalMatch[2]!;
         const session = sessionRequired(state, request);
         const { proposal, room, member } = state.requireProposal(id, session);
-        if (route === "public" && method === "GET") { await send(200, state.publicProposal(proposal)); return; }
+        if (route === "public" && method === "GET") { await send(200, await state.proposalView(proposal)); return; }
         if (route === "me" && method === "GET") { await send(200, await state.privateProposal(proposal, member)); return; }
         if (route === "me/explanation" && method === "POST") {
           const input = z.object({ proposalHash: z.string() }).strict().parse(await readJson(request));
@@ -204,8 +224,8 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         }
       }
       if (path === "/api/demo/merchant" && method === "GET") {
-        const session = sessionRequired(state, request); state.requireHost(session.roomId, session);
-        await send(200, { offers: (await state.allOffers()).map(offer => ({ offerId: offer.offerId, propertyName: offer.propertyName, offerVersion: offer.offerVersion, totalCents: offer.totalCents, cancellationLabel: offer.cancellationPolicyCode, available: offer.available })) }); return;
+        const session = sessionRequired(state, request); const { room } = state.requireHost(session.roomId, session);
+        await send(200, { offers: (await state.allOffers(state.offerIdsFor(room))).map(offer => ({ offerId: offer.offerId, propertyName: offer.propertyName, offerVersion: offer.offerVersion, totalCents: offer.totalCents, cancellationLabel: offer.cancellationPolicyCode, available: offer.available })) }); return;
       }
       if (path === "/api/merchant/events" && method === "POST") {
         const session = sessionRequired(state, request); state.requireHost(session.roomId, session);
@@ -216,7 +236,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       if (path === "/api/demo/reset" && method === "POST") {
         const session = sessionRequired(state, request); state.requireHost(session.roomId, session);
         z.object({ confirmed: z.literal(true) }).strict().parse(await readJson(request));
-        state.streams.close(); await persistence?.clear(); state = new AccordState(persistence); await state.ready;
+        state.streams.close(); await persistence?.clear(); state = new AccordState(persistence, providers); await state.ready;
         response.setHeader("set-cookie", "accord_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
         await send(200, { reset: true, sessionsInvalidated: true }); return;
       }
@@ -240,7 +260,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   let persistence: MongoPersistence | undefined;
   if (process.env.MONGODB_URI) {
     if (!process.env.ACCORD_ENCRYPTION_KEY) throw new Error("ACCORD_ENCRYPTION_KEY is required when MONGODB_URI is set");
-    persistence = await MongoPersistence.connect(process.env.MONGODB_URI, process.env.MONGODB_DB ?? "accord", process.env.ACCORD_ENCRYPTION_KEY);
+    try { persistence = await MongoPersistence.connect(process.env.MONGODB_URI, process.env.MONGODB_DB ?? "accord", process.env.ACCORD_ENCRYPTION_KEY); }
+    catch (error) {
+      process.stderr.write(`\nCould not connect to MongoDB (${(error as Error).name}).\n` +
+        "If you use Atlas, your current IP is probably not allowed: Atlas → Security → Network Access → Add IP Address.\n" +
+        "To run without Mongo (state in memory only), start with MONGODB_URI set to an empty value.\n\n");
+      process.exit(1);
+    }
   }
   const { server, state } = createApi({ persistence });
   await state.ready;

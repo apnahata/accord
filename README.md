@@ -21,6 +21,15 @@ Open the Vite URL shown in the terminal. It proxies `/api` to `http://localhost:
 
 Create a group as Alex, open the invite in three separate browser profiles, and join as Priya, Jordan and Mateo. The private intake is conversation-first when Gemini is configured: Accord asks a functional clarification, then shows an unconfirmed draft for review. Without a verified model connection, it says AI is unavailable and opens manual entry. Confirm the brief's private constraints. Solve to see the $1,200 Miami demo stay. All four members approve and authorize their **simulated** $300 shares. From Alex's authenticated merchant console, increase Miami to $1,440. The old consent becomes stale; Alex privately sees that the new $360 share exceeds his $350 cap. Replan to the $1,120 Tampa demo stay, get four fresh $280 authorizations, and book once. The receipt clearly says no card was charged and no real accommodation was reserved.
 
+## Live stay search
+
+When the host creates a group with trip details (destination, dates, guests), Accord searches real inventory instead of the demo catalog:
+
+- **LiteAPI** (`LITEAPI_KEY`): hotels with live rates, refundability, occupancy, check-out times, facilities, review analysis and nearby places. Booking re-quotes the exact approved room first; any price or terms change stales consent instead of booking. With a sandbox key (`sand_…`), bookings are test bookings and nothing is charged.
+- **SerpApi Google Hotels** (`SERPAPI_KEY`): vacation rentals with prices, free-cancellation dates, capacity and amenities. These are search-only: once everyone approves, the host is handed off to the listing site. Results are cached for 30 minutes per group to save search credits.
+
+Provider data is mapped conservatively into the domain `Offer`: missing accessibility evidence is *unknown* (never a pass), a closed or missing refund window is non-refundable, and check-out times come from the listing. Feasibility, ranking and consent stay deterministic in `@accord/domain`; Gemini only writes an optional public summary from listing facts. Times are interpreted in `America/New_York`, so destinations should be US East Coast cities for now. A member may leave a group at any time, which stales any proposal because everyone's equal share changes. Groups created without trip details keep using the controlled demo catalog (and the automated flow tests use it).
+
 ## MongoDB persistence
 
 Set these in a root `.env` (gitignored) to keep all coordinator state in MongoDB Atlas:
@@ -54,4 +63,4 @@ After the group searches, members can ask Gemini to explain the backend-selected
 - `packages/integrations` contains provider and merchant transports. Optional sponsor services stay unavailable until configured and proven live.
 - `deploy` contains a Vultr-ready template, not an actual deployment. It requires a real integrated image, `MONGODB_URI`/`ACCORD_ENCRYPTION_KEY`, host and DNS before a production claim. Without Mongo configured the API reports `UNCONFIGURED` and deliberately fails the deployment readiness gate.
 
-Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Visa/payment is simulated; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. Live local Gemini intake and explanation calls have been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.
+Operational state is Mongo-backed when configured; it is still a single-process coordinator (SSE fan-out and the working copy are process-local), so do not run multiple replicas. Member contributions are simulated (no card is charged); stays are real provider inventory, booked in LiteAPI's sandbox or handed off to the listing site; Backboard, Tiger, Solana and ElevenLabs are not wired to live services. One live local Gemini intake call has been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. Live local Gemini intake and explanation calls have been verified with `gemini-3.5-flash-lite`; that does not establish deployed or reliable use. See [sponsor evidence](SPONSOR_EVIDENCE.md) for exact claim status.
