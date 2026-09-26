@@ -3,17 +3,18 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema } from "@accord/domain";
+import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema, equalShares } from "@accord/domain";
 import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 import { MongoPersistence } from "./persistence.js";
 import { normalizeModelCheckout } from "./model-time.js";
 import { triageExtraction } from "./intake.js";
+import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
 
 const name = z.string().trim().min(1).max(100);
 const roomIdPattern = /^\/api\/rooms\/([^/]+)(?:\/(.*))?$/;
-const proposalPattern = /^\/api\/proposals\/([^/]+)\/(public|me|consent|execute)$/;
+const proposalPattern = /^\/api\/proposals\/([^/]+)\/(public|me|me\/explanation|consent|execute)$/;
 
 function json(response: ServerResponse, status: number, body: unknown) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -147,6 +148,19 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           await send(200, result); return;
         }
         if (route === "offers" && method === "GET") { await send(200, await state.offers(room)); return; }
+        if (route === "offers/explanation" && method === "POST") {
+          const expected = z.object({ recommendedOfferId: z.string(), offerVersion: z.string() }).strict().parse(await readJson(request));
+          if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
+          const offers = await state.offers(room);
+          const recommendation = offers.offers.find(offer => offer.offerId === offers.recommendedOfferId);
+          if (offers.recommendedOfferId !== expected.recommendedOfferId || recommendation?.offerVersion !== expected.offerVersion) throw new AppError(409, "OFFER_CHANGED");
+          const fingerprint = publicOffersFingerprint(offers);
+          const explanation = await explainPublic(model, offers);
+          const current = await state.offers(room);
+          state.requireRoom(roomId, sessionRequired(state, request));
+          if (publicOffersFingerprint(current) !== fingerprint) throw new AppError(409, "OFFER_CHANGED");
+          await send(200, explanation); return;
+        }
         if (route === "events" && method === "GET") { await send(200, { events: room.events.slice(-100) }); return; }
         if (route === "events/stream" && method === "GET") { await state.streams.connect(request, response, roomId, "public"); return; }
         if (route === "me/events/stream" && method === "GET") { await state.streams.connect(request, response, roomId, "private"); return; }
@@ -160,6 +174,23 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         const { proposal, room, member } = state.requireProposal(id, session);
         if (route === "public" && method === "GET") { await send(200, state.publicProposal(proposal)); return; }
         if (route === "me" && method === "GET") { await send(200, await state.privateProposal(proposal, member)); return; }
+        if (route === "me/explanation" && method === "POST") {
+          const input = z.object({ proposalHash: z.string() }).strict().parse(await readJson(request));
+          if (input.proposalHash !== proposal.hash) throw new AppError(409, "PROPOSAL_STALE");
+          if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
+          const own = await state.privateProposal(proposal, member);
+          const currentOffer = proposal.state === "STALE" ? await state.currentOffer(proposal.snapshot.offer.offerId) : undefined;
+          const currentVersion = currentOffer?.offerVersion ?? proposal.snapshot.offer.offerVersion;
+          const currentShare = equalShares((currentOffer ?? proposal.snapshot.offer).totalCents, proposal.snapshot.memberIds)[member.id]!;
+          const fingerprint = JSON.stringify([own.proposal.state, own.myConstraintChecks, own.myContributionCents, currentVersion, member.capsuleVersion]);
+          const explanation = await explainPrivate(model, own, member.constraints!, currentShare);
+          const latest = state.requireProposal(id, sessionRequired(state, request));
+          const latestOwn = await state.privateProposal(latest.proposal, latest.member);
+          const latestOffer = latest.proposal.state === "STALE" ? await state.currentOffer(latest.proposal.snapshot.offer.offerId) : undefined;
+          const latestVersion = latestOffer?.offerVersion ?? latest.proposal.snapshot.offer.offerVersion;
+          if (JSON.stringify([latestOwn.proposal.state, latestOwn.myConstraintChecks, latestOwn.myContributionCents, latestVersion, latest.member.capsuleVersion]) !== fingerprint) throw new AppError(409, "PROPOSAL_STALE");
+          await send(200, explanation); return;
+        }
         if (route === "consent" && method === "POST") {
           const input = z.object({ proposalHash: z.string(), version: z.number().int(), amountCents: z.number().int().nonnegative() }).strict().parse(await readJson(request));
           if (!request.headers["idempotency-key"]) throw new AppError(422, "IDEMPOTENCY_KEY_REQUIRED");

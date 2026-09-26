@@ -11,7 +11,7 @@ The domain package currently exports:
 - AI typed extraction schema;
 - canonical room-scoped IDs/session timestamps and deterministic feasible candidate evaluation.
 
-The generic adapters in `src/merchant.ts` and `src/ai.ts` accept shared contracts by injection. The local API owns the `/consent` and booking gates; those are currently process-memory transitions. It still needs durable identity/consent repositories, public/private AI explanation schemas and input projectors, Backboard assistant mapping, and a Solana commitment journal before those features can be enabled.
+The generic adapters in `src/merchant.ts` and `src/ai.ts` accept shared contracts by injection. The local API owns the `/consent` and booking gates; they persist through Mongo when configured and use process memory otherwise. Public/private AI explanation input projectors and routes now live in `packages/server/src/explanations.ts`; they use only presentation schemas, not new business contracts. Backboard assistant mapping and a Solana commitment journal are still needed before those features can be enabled.
 
 ## Commitments that caller must preserve
 
