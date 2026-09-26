@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { Availability, Constraints, MerchantMutation, Offer, TripPlan } from "./schemas.js";
-import { OfferSchema } from "./schemas.js";
+import type { Availability, Constraints, MerchantMutation, Offer } from "./schemas.js";
+import { OfferSchema, PLANNING_HORIZON_DAYS } from "./schemas.js";
 
 export function equalShares(totalCents: number, memberIds: readonly string[]) {
   if (!Number.isSafeInteger(totalCents) || totalCents < 0 || !memberIds.length || new Set(memberIds).size !== memberIds.length) throw new Error("INVALID_SPLIT");
@@ -74,12 +74,31 @@ export function nearMisses(offers: readonly Offer[], members: readonly { id: str
 }
 
 export type DateWindow = { checkIn: string; checkOut: string };
+type Answers = readonly { constraints: Pick<Constraints, "availability" | "nights"> }[];
+
+/** The days worth scanning: everyone's availability together, from tomorrow up to the planning horizon. */
+export function planningSpan(members: Answers, today: string) {
+  const ranges = members.flatMap(member => member.constraints.availability ?? []);
+  if (!ranges.length) return undefined;
+  const first = addDays(today, 1), last = addDays(today, PLANNING_HORIZON_DAYS);
+  const earliest = ranges.map(range => range.from).reduce((a, b) => a < b ? a : b), latest = ranges.map(range => range.to).reduce((a, b) => a > b ? a : b);
+  const span = { earliest: earliest < first ? first : earliest, latest: latest > last ? last : latest };
+  return span.latest > span.earliest ? span : undefined;
+}
+
+/** The trip length most people asked for; a tie goes to the shorter trip. Three nights if nobody said. */
+export function preferredNights(members: Answers) {
+  const counts = new Map<number, number>();
+  for (const member of members) if (member.constraints.nights) counts.set(member.constraints.nights, (counts.get(member.constraints.nights) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 3;
+}
+
 /**
  * Every trip-length window inside the plan, split into windows everyone can make and windows exactly one
  * member can't. Members who gave no dates are free throughout. Picks up to `limit` non-overlapping
  * shared windows, earliest first; near windows name the one member who would need to adjust.
  */
-export function dateWindows(plan: Pick<TripPlan, "earliest" | "latest" | "nights">, members: readonly { id: string; constraints: Pick<Constraints, "availability"> }[], limit = 2) {
+export function dateWindows(plan: { earliest: string; latest: string; nights: number }, members: readonly { id: string; constraints: Pick<Constraints, "availability"> }[], limit = 2) {
   const shared: DateWindow[] = [], near: Array<DateWindow & { memberId: string }> = [];
   for (let checkIn = plan.earliest; addDays(checkIn, plan.nights) <= plan.latest; checkIn = addDays(checkIn, 1)) {
     const window = { checkIn, checkOut: addDays(checkIn, plan.nights) };

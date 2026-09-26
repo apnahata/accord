@@ -208,6 +208,8 @@ export class AccordState {
     this.autopilot.kick(room, "READY");
   }
   confirmConstraints(room: Room, member: Member, constraints: Constraints) {
+    // The group's dates come only from members' answers, so a trip still being planned needs everyone's.
+    if (room.plan && !room.trip && !constraints.availability?.length) throw new AppError(422, "DATES_REQUIRED");
     member.constraints = structuredClone(constraints); member.capsuleVersion++; member.confirmedAt = nowIso();
     for (const entry of member.inbox ?? []) if (entry.nudge?.status === "OPEN") entry.nudge.status = "EXPIRED";
     this.stale(room, "Confirmed requirements changed.");

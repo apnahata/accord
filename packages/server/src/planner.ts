@@ -1,6 +1,6 @@
 import {
-  dateWindows, daysBetween, mentions, rankDestinations, TripSchema,
-  type DateWindow, type PlanningDTO, type TripPlan, type TripStyle,
+  addDays, dateWindows, daysBetween, isHome, localDay, mentions, PLANNING_HORIZON_DAYS, planningSpan, preferredNights, rankDestinations, regionFor, TripSchema,
+  type DateWindow, type PlanningDTO, type TripStyle,
 } from "@accord/domain";
 import { AppError } from "./errors.js";
 import { dayRange, type AccordState, type Member, type Room } from "./state.js";
@@ -30,7 +30,8 @@ export type Planning = {
 export type DestinationIdea = { name: string; timeZone: string; why: string; styles: TripStyle[] };
 /** Anonymous planning facts only: no names, no budgets, no one's individual answers. */
 export type DestinationsInput = {
-  region: TripPlan["region"]; from?: string; countryCode: string; nights: number; guests: number;
+  /** Where members are leaving from, sorted so the order can't hint at who wrote what. */
+  from: string[]; countryCode: string; nights: number; guests: number;
   windows: DateWindow[]; styleCounts: Partial<Record<TripStyle, number>>; ideas: string[]; avoid: string[];
 };
 type Ready = Array<Member & { constraints: Constraints }>;
@@ -69,21 +70,30 @@ export class Planner {
   }
 
   async plan(room: Room) {
-    const members = this.state.readyMembers(room), plan = room.plan;
-    if (!members || !plan || room.trip) return;
+    const members = this.state.readyMembers(room);
+    if (!members || !room.plan || room.trip) return;
     const key = this.key(room);
     if (room.planning?.key === key && room.planning.stage !== "PLANNING") return;
     const planning: Planning = { key, stage: "PLANNING", message: "Accord is working out where and when.", windows: [], destinations: [], options: [], votes: {} };
     room.planning = planning; this.state.touch(room);
 
-    const { windows, near, sharedCount } = dateWindows(plan, members);
-    if (!windows.length) { await this.#noDates(room, planning, near, plan.nights); return; }
+    const span = planningSpan(members, localDay(new Date().toISOString()));
+    if (!span) { this.#settle(room, planning, "NO_OPTION", "Everyone’s dates have passed or are too far away. Members can update when they’re free."); return; }
+    const wanted = preferredNights(members);
+    let nights = wanted, dates = dateWindows({ ...span, nights }, members);
+    // A shorter trip everyone can make beats asking someone to move their dates.
+    for (let shorter = wanted - 1; !dates.windows.length && shorter >= 2; shorter--) {
+      const tried = dateWindows({ ...span, nights: shorter }, members);
+      if (tried.windows.length) { dates = tried; nights = shorter; }
+    }
+    const { windows, near, sharedCount } = dates;
+    if (!windows.length) { await this.#noDates(room, planning, near, wanted); return; }
     planning.windows = windows;
     for (const member of members) for (const entry of member.inbox ?? []) if (entry.nudge?.check === "DATES" && entry.nudge.status === "OPEN") entry.nudge.status = "EXPIRED";
-    this.state.emit(room, "PLAN_DATES", sharedCount === 1
-      ? `Only one set of dates works for everyone: ${dayRange(windows[0]!)}.`
-      : `${sharedCount} possible start dates work for everyone. Accord will price ${list(windows.map(dayRange))}.`, undefined,
-      { ...ACCORD, detail: "Worked out from everyone’s private availability. No one’s dates are shown to the group." });
+    this.state.emit(room, "PLAN_DATES", `${sharedCount === 1
+      ? `Only one ${nights}-night stretch works for everyone: ${dayRange(windows[0]!)}.`
+      : `${sharedCount} possible ${nights}-night stretches work for everyone. Accord will price ${list(windows.map(dayRange))}.`}${nights < wanted ? ` Most people wanted ${wanted} nights, but no ${wanted}-night stretch fits everyone’s dates.` : ""}`, undefined,
+      { ...ACCORD, detail: "Worked out from everyone’s private availability and the trip length most people asked for. No one’s answers are shown to the group." });
 
     const { ideas, source } = await this.#destinations(room, members, windows);
     planning.destinations = ideas;
@@ -97,7 +107,7 @@ export class Planner {
         : "Picked from Accord’s destination list by the trip styles people chose, skipping anywhere someone ruled out." });
 
     const candidates = ideas.flatMap(idea => windows.map(window => ({ idea, window }))).slice(0, MAX_SEARCHES);
-    const trips = candidates.map(({ idea, window }) => TripSchema.parse({ destination: idea.name, countryCode: plan.countryCode,
+    const trips = candidates.map(({ idea, window }) => TripSchema.parse({ destination: idea.name, countryCode: room.plan!.countryCode,
       checkIn: window.checkIn, checkOut: window.checkOut, guests: members.length, timeZone: idea.timeZone }));
     const found = await this.state.searchCandidates(room, trips);
     if (room.planning !== planning) return;
@@ -126,7 +136,7 @@ export class Planner {
       const nudged = await this.hooks.nudge(room);
       this.#settle(room, planning, "NO_OPTION", nudged
         ? "No trip works for everyone yet. Accord has privately checked in with some members and will keep planning."
-        : "No trip works for everyone’s confirmed requirements yet. Members can review their own answers privately, or the host can widen the dates.");
+        : "No trip works for everyone’s confirmed requirements yet. Members can review their own answers privately.");
       return;
     }
     if (options.length === 1) { await this.#decide(room, planning, options[0]!, "ONLY_OPTION"); return; }
@@ -177,8 +187,9 @@ export class Planner {
     for (const member of answered) for (const style of member.constraints!.tripStyles ?? []) counts.set(style, (counts.get(style) ?? 0) + 1);
     const stage: PlanningDTO["stage"] = current?.stage ?? (answered.length < members.length || members.length < 2 ? "COLLECTING" : "PLANNING");
     const closed = current?.stage === "DECIDED";
+    const today = localDay(new Date().toISOString());
     return {
-      plan: room.plan!, stage, ...(current?.message ? { message: current.message } : {}),
+      plan: room.plan!, horizon: { earliest: addDays(today, 1), latest: addDays(today, PLANNING_HORIZON_DAYS) }, stage, ...(current?.message ? { message: current.message } : {}),
       answered: answered.length, total: members.length,
       styles: answered.length >= 2 ? [...counts].sort((a, b) => b[1] - a[1]).map(([style, count]) => ({ style, count })) : [],
       windows: current?.windows ?? [], destinations: (current?.destinations ?? []).map(({ name, why }) => ({ name, why })),
@@ -232,21 +243,20 @@ export class Planner {
       waiting = true;
     }
     this.#settle(room, planning, "NO_OPTION", waiting
-      ? "No dates in the window work for everyone yet. Accord has privately checked in with some members."
-      : "No dates in the window work for everyone. Members can update when they’re free, or the host can widen the window.");
+      ? "No dates work for everyone yet. Accord has privately checked in with some members."
+      : "No dates work for everyone. Members can update when they’re free.");
   }
 
   async #destinations(room: Room, members: Ready, windows: DateWindow[]) {
-    const plan = room.plan!;
     const styleCounts: Partial<Record<TripStyle, number>> = {};
     for (const member of members) for (const style of member.constraints.tripStyles ?? []) styleCounts[style] = (styleCounts[style] ?? 0) + 1;
     // Sorted so the order can't hint at who wrote what.
-    const ideas = members.map(member => member.constraints.placeIdeas?.trim()).filter((text): text is string => !!text).sort();
-    const avoid = members.map(member => member.constraints.placesToAvoid?.trim()).filter((text): text is string => !!text).sort();
-    const ruledOut = (name: string) => avoid.some(text => mentions(text, name));
+    const answers = (pick: (constraints: Constraints) => string | undefined) => members.map(member => pick(member.constraints)?.trim()).filter((text): text is string => !!text).sort();
+    const ideas = answers(item => item.placeIdeas), avoid = answers(item => item.placesToAvoid), from = answers(item => item.leavingFrom);
+    const ruledOut = (name: string) => avoid.some(text => mentions(text, name)) || from.some(text => isHome(text, name));
     const suggest = this.state.providers.suggestDestinations;
     if (suggest) {
-      const input: DestinationsInput = { region: plan.region, ...(plan.from ? { from: plan.from } : {}), countryCode: plan.countryCode, nights: plan.nights,
+      const input: DestinationsInput = { from, countryCode: room.plan!.countryCode, nights: daysBetween(windows[0]!.checkIn, windows[0]!.checkOut),
         guests: members.length, windows, styleCounts, ideas, avoid };
       const suggested = (await suggest(input).catch(() => undefined) ?? [])
         .map(idea => ({ name: idea.name.trim(), timeZone: validZone(idea.timeZone) ? idea.timeZone : "America/New_York", why: idea.why.trim().slice(0, 160), styles: idea.styles }))
@@ -255,7 +265,7 @@ export class Planner {
       if (suggested.length) return { ideas: suggested, source: "AI" as const };
     }
     const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
-    const ranked = rankDestinations({ region: plan.region, styleCounts, ideas, avoid, months }, MAX_DESTINATIONS);
+    const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, MAX_DESTINATIONS);
     return { source: "ACCORD" as const, ideas: ranked.map(item => {
       const matched = item.styles.filter(style => styleCounts[style]);
       return { name: item.name, timeZone: item.timeZone, styles: item.styles,

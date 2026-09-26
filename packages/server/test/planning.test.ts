@@ -9,8 +9,7 @@ import type { DestinationIdea, DestinationsInput } from "../src/planner.js";
 const fast = { readyDelayMs: 0, replanDelayMs: 0, watchIntervalMs: 0 };
 const today = localDay(new Date().toISOString());
 const day = (offset: number) => addDays(today, offset);
-const plan = { earliest: day(30), latest: day(60), nights: 3 };
-const base = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", maxContributionCents: 200000 };
+const base = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", maxContributionCents: 200000, availability: [{ from: day(30), to: day(60) }] };
 
 async function waitFor<T>(read: () => Promise<T | undefined | false>, label: string, timeoutMs = 4000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -37,7 +36,7 @@ type Call = Awaited<ReturnType<typeof start>>;
 
 async function plannedGroup(call: Call, answers: Record<string, Record<string, unknown>>) {
   const [host, ...others] = Object.keys(answers);
-  const created = await call("/rooms", "POST", { name: "Spring Trip", displayName: host, plan, rehearsal: true });
+  const created = await call("/rooms", "POST", { name: "Spring Trip", displayName: host, plan: {}, rehearsal: true });
   assert.equal(created.status, 201);
   const roomId = created.data.roomId as string;
   const cookies: Record<string, string> = { [host!]: created.cookie! };
@@ -136,13 +135,14 @@ test("when two members could each unblock the dates, one yes retires the other's
   const { roomId, cookies } = await plannedGroup(call, {
     Alex: { availability: [{ from: day(35), to: day(44) }], tripStyles: ["CITY"] },
     Mateo: { availability: [{ from: day(30), to: day(42) }], tripStyles: ["CITY"] },
-    Priya: { availability: [{ from: day(40), to: day(49) }], tripStyles: ["BEACH"] },
+    // Everyone overlaps for one night only, too short to plan without someone moving.
+    Priya: { availability: [{ from: day(41), to: day(49) }], tripStyles: ["BEACH"] },
   });
   const ask = (name: string) => waitFor(async () => (await call(`/rooms/${roomId}/me/inbox`, "GET", undefined, cookies[name])).data.messages
     .find((message: any) => message.kind === "NUDGE"), `${name}'s date question`);
   const [priya, mateo] = [await ask("Priya"), await ask("Mateo")];
   assert.equal(priya.nudge.acceptLabel, `I can make ${dayRange({ checkIn: day(39), checkOut: day(42) })}`);
-  assert.equal(mateo.nudge.acceptLabel, `I can make ${dayRange({ checkIn: day(40), checkOut: day(43) })}`);
+  assert.equal(mateo.nudge.acceptLabel, `I can make ${dayRange({ checkIn: day(41), checkOut: day(44) })}`);
 
   assert.equal((await call(`/rooms/${roomId}/me/inbox/${priya.id}/respond`, "POST", { action: "ACCEPT" }, cookies.Priya)).status, 200);
   await waitFor(async () => (await call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data.planning?.stage === "VOTING", "the shortlist");
@@ -154,7 +154,7 @@ test("when two members could each unblock the dates, one yes retires the other's
 
 function plannedState(suggest?: (input: DestinationsInput) => Promise<DestinationIdea[] | undefined>) {
   const state = new AccordState(undefined, suggest ? { suggestDestinations: suggest } : {}, { enabled: false, watchIntervalMs: 0 });
-  const created = state.createRoom("Trip", "Plan it", "Alex", undefined, { plan: { ...plan, region: "ANY", countryCode: "US" }, rehearsal: true });
+  const created = state.createRoom("Trip", "Plan it", "Alex", undefined, { plan: { countryCode: "US" }, rehearsal: true });
   const room = state.rooms.get(created.roomId)!;
   state.join(created.inviteToken, "Priya");
   const [alex, priya] = room.memberIds.map(id => state.members.get(id)!);
@@ -167,21 +167,24 @@ test("destination suggestions see only anonymous totals, and can't bring back a 
     seen = input;
     return [
       { name: "Miami, FL", timeZone: "America/New_York", styles: ["BEACH"], why: "Beaches." },
+      { name: "Boston, MA", timeZone: "America/New_York", styles: ["CITY"], why: "Close by." },
       { name: "Asheville, NC", timeZone: "America/New_York", styles: ["MOUNTAINS"], why: "Mountain town." },
       { name: "Bend, OR", timeZone: "Not/AZone", styles: ["NATURE"], why: "Outdoors." },
     ];
   });
-  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, maxContributionCents: 123456, tripStyles: ["BEACH"], placeIdeas: "somewhere warm" }));
-  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["MOUNTAINS"], placesToAvoid: "not Miami" }));
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, maxContributionCents: 123456, tripStyles: ["BEACH"], placeIdeas: "somewhere warm", leavingFrom: "Philadelphia" }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["MOUNTAINS"], placesToAvoid: "not Miami", leavingFrom: "Boston" }));
   await state.autopilot.planNow(room);
 
   assert.deepEqual(seen!.styleCounts, { BEACH: 1, MOUNTAINS: 1 });
   assert.deepEqual(seen!.ideas, ["somewhere warm"]);
+  assert.deepEqual(seen!.from, ["Boston", "Philadelphia"], "departures are sorted so they can't be matched to people");
+  assert.equal(seen!.nights, 3);
   const sent = JSON.stringify(seen);
   for (const secret of ["Alex", "Priya", "123456", "200000", alex.id, priya.id]) assert.ok(!sent.includes(secret), `suggestion input leaked ${secret}`);
   const view = state.roomDTO(room, alex.id).planning!;
   assert.equal(view.stage, "VOTING");
-  assert.deepEqual(view.destinations.map(item => item.name), ["Asheville, NC", "Bend, OR"]);
+  assert.deepEqual(view.destinations.map(item => item.name), ["Asheville, NC", "Bend, OR"], "no ruled-out place, and nowhere someone lives");
   assert.equal(room.planning!.destinations[1]!.timeZone, "America/New_York");
 
   // One vote and then the deadline: Accord closes the vote with what was cast.
@@ -211,6 +214,35 @@ test("a tied vote goes to the better fit and says so, and stays show their own d
   await state.autopilot.planner.closeVote(room, "VOTE");
   assert.equal(state.roomDTO(room, alex.id).trip!.destination, best!.destination);
   assert.ok(room.events.some(event => event.title.includes(`tie at 1 vote each, so Accord went with the trip that fits the group best: ${best!.destination}`)), "the timeline says the vote was tied");
+});
+
+test("the host only names the group, and everyone must say when they're free", async t => {
+  const call = await start(t);
+  assert.equal((await call("/rooms", "POST", { name: "Trip", displayName: "Alex", plan: { earliest: day(30), latest: day(60), nights: 3 } })).status, 422);
+  const created = await call("/rooms", "POST", { name: "Trip", displayName: "Alex", plan: {}, rehearsal: true });
+  assert.equal(created.status, 201);
+  const room = (await call(`/rooms/${created.data.roomId}`, "GET", undefined, created.cookie)).data;
+  assert.deepEqual(room.planning.horizon, { earliest: day(1), latest: day(180) });
+  const { availability: _dates, ...undated } = base;
+  const refused = await call(`/rooms/${created.data.roomId}/me/constraints`, "POST", { ...undated, confirmed: true }, created.cookie);
+  assert.equal(refused.status, 422);
+  assert.equal(refused.data.code, "DATES_REQUIRED");
+});
+
+test("the trip is as long as most people want, and shorter only when that's the only way everyone can go", async () => {
+  const first = plannedState();
+  first.state.confirmConstraints(first.room, first.alex, ConstraintsSchema.parse({ ...base, nights: 2, availability: [{ from: day(30), to: day(45) }] }));
+  first.state.confirmConstraints(first.room, first.priya, ConstraintsSchema.parse({ ...base, nights: 2, availability: [{ from: day(40), to: day(50) }] }));
+  await first.state.autopilot.planNow(first.room);
+  assert.deepEqual(first.room.planning!.windows[0], { checkIn: day(40), checkOut: day(42) });
+
+  const second = plannedState();
+  second.state.confirmConstraints(second.room, second.alex, ConstraintsSchema.parse({ ...base, nights: 5, availability: [{ from: day(30), to: day(40) }] }));
+  second.state.confirmConstraints(second.room, second.priya, ConstraintsSchema.parse({ ...base, nights: 5, availability: [{ from: day(36), to: day(50) }] }));
+  await second.state.autopilot.planNow(second.room);
+  assert.deepEqual(second.room.planning!.windows, [{ checkIn: day(36), checkOut: day(40) }]);
+  assert.ok(second.room.events.some(event => event.title.includes("Most people wanted 5 nights, but no 5-night stretch fits everyone’s dates.")));
+  assert.ok(!second.priya.inbox?.some(entry => entry.kind === "NUDGE"), "nobody is asked to move when a shorter trip works");
 });
 
 test("a single workable trip is chosen without a vote, and the host can reopen planning", async () => {

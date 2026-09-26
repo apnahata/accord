@@ -166,7 +166,7 @@ test("an open trip vote survives a coordinator restart with every ballot sealed 
   const fast: AutopilotOptions = { readyDelayMs: 0, replanDelayMs: 0, watchIntervalMs: 0 };
   const today = localDay(new Date().toISOString());
   let api = await boot(fast);
-  const created = await api.call("/rooms", "POST", { name: "Spring Trip", displayName: "Alex", plan: { earliest: addDays(today, 30), latest: addDays(today, 60), nights: 3 }, rehearsal: true });
+  const created = await api.call("/rooms", "POST", { name: "Spring Trip", displayName: "Alex", plan: {}, rehearsal: true });
   const roomId = created.data.roomId;
   const cookies: Record<string, string> = { Alex: created.response.headers.get("set-cookie")!.split(";")[0]! };
   for (const displayName of ["Priya", "Jordan"]) {
@@ -174,7 +174,7 @@ test("an open trip vote survives a coordinator restart with every ballot sealed 
     cookies[displayName] = joined.response.headers.get("set-cookie")!.split(";")[0]!;
   }
   for (const [displayName, cookie] of Object.entries(cookies)) {
-    const answer = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", maxContributionCents: 200000, tripStyles: displayName === "Jordan" ? ["SKI"] : ["BEACH", "CITY"], confirmed: true };
+    const answer = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", maxContributionCents: 200000, availability: [{ from: addDays(today, 30), to: addDays(today, 60) }], tripStyles: displayName === "Jordan" ? ["SKI"] : ["BEACH", "CITY"], confirmed: true };
     assert.equal((await api.call(`/rooms/${roomId}/me/constraints`, "POST", answer, cookie)).response.status, 200);
   }
   const options = await waitFor(async () => { const room = (await api.call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data; return room.planning?.stage === "VOTING" && room.planning.options; }, "the shortlist");

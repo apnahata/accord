@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { checkMember, dateWindows, demoCatalog, mentions, nearMisses, rankDestinations, TripPlanSchema } from "../src/index.js";
+import { checkMember, dateWindows, demoCatalog, isHome, mentions, nearMisses, planningSpan, preferredNights, rankDestinations, regionFor, TripPlanSchema } from "../src/index.js";
 
 const open = { requiresFullCashRefund: false, requiresStepFreeAccess: false, softPreference: "", maxContributionCents: 90000 };
 
@@ -77,8 +77,29 @@ test("Accord's own destination picks follow the group's styles, skip ruled-out p
   assert.equal(mentions("somewhere cold", "Tampa, FL"), false);
 });
 
-test("a planning window must fit the trip and stay under four months", () => {
-  assert.equal(TripPlanSchema.safeParse({ earliest: "2027-03-01", latest: "2027-03-03", nights: 3 }).success, false);
-  assert.equal(TripPlanSchema.safeParse({ earliest: "2027-03-01", latest: "2027-08-01", nights: 3 }).success, false);
-  assert.deepEqual(TripPlanSchema.parse({ earliest: "2027-03-01", latest: "2027-03-31", nights: 3 }), { earliest: "2027-03-01", latest: "2027-03-31", nights: 3, region: "ANY", countryCode: "US" });
+test("the host sets nothing about when or where; the group's answers decide", () => {
+  assert.deepEqual(TripPlanSchema.parse({}), { countryCode: "US" });
+  assert.equal(TripPlanSchema.safeParse({ earliest: "2027-03-01", latest: "2027-03-31", nights: 3 }).success, false);
+
+  const free = (from: string, to: string, nights?: number) => ({ constraints: { availability: [{ from, to }], ...(nights ? { nights } : {}) } });
+  assert.deepEqual(planningSpan([free("2027-03-05", "2027-03-12"), free("2027-03-08", "2027-03-20")], "2027-01-10"), { earliest: "2027-03-05", latest: "2027-03-20" });
+  assert.deepEqual(planningSpan([free("2027-01-01", "2027-01-20")], "2027-01-10"), { earliest: "2027-01-11", latest: "2027-01-20" }, "nothing before tomorrow");
+  assert.equal(planningSpan([free("2027-01-01", "2027-01-20")], "2027-02-01"), undefined, "dates that have passed can't be planned");
+  assert.equal(planningSpan([free("2027-06-01", "2027-12-31")], "2027-01-10")!.latest, "2027-07-09", "nothing past six months");
+
+  assert.equal(preferredNights([free("a", "b", 4), free("a", "b", 2), free("a", "b", 4), free("a", "b")]), 4);
+  assert.equal(preferredNights([free("a", "b", 5), free("a", "b", 2)]), 2, "a tie goes to the shorter trip");
+  assert.equal(preferredNights([free("a", "b")]), 3);
+
+  assert.equal(regionFor(["Seattle", "Los Angeles, California"]), "WEST");
+  assert.equal(regionFor(["New York", "Boston"]), "EAST", "unrecognized places don't count against the ones Accord knows");
+  assert.equal(regionFor(["New York", "California"]), "ANY", "a spread-out group looks everywhere");
+  assert.equal(regionFor(["LA"]), "ANY", "a state code isn't a place someone lives");
+  assert.equal(regionFor([]), "ANY");
+
+  const fromNewYork = rankDestinations({ region: "EAST", styleCounts: { CITY: 2, LAKE: 1 }, ideas: [], avoid: [], from: ["New York"], months: [7] }).map(pick => pick.name);
+  assert.ok(!fromNewYork.includes("New York, NY"), "a group isn't sent to where someone lives");
+  assert.ok(fromNewYork.includes("Lake George, NY"), "the rest of the state is still fair game");
+  assert.equal(isHome("Washington, DC", "Washington, DC"), true);
+  assert.equal(isHome("Washington, DC", "Seattle, WA"), false);
 });

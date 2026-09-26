@@ -27,9 +27,11 @@ export type TripOptionDTO = {
   /** Only revealed once voting closes. */
   votes?: number;
 };
-/** Everything here is either host-set or an anonymous total across members. */
+/** Everything here is an anonymous total across members or something Accord worked out from them. */
 export type PlanningDTO = {
   plan: TripPlan;
+  /** Days members can say they're free on. */
+  horizon: { earliest: string; latest: string };
   stage: 'COLLECTING' | 'PLANNING' | 'VOTING' | 'DECIDED' | 'NO_OPTION';
   message?: string;
   answered: number; total: number;

@@ -1,8 +1,8 @@
-import type { TripPlan, TripStyle } from "./schemas.js";
+import type { Region, TripStyle } from "./schemas.js";
 
 export type Destination = {
   name: string; state: string; styles: TripStyle[]; timeZone: string;
-  region: Exclude<TripPlan["region"], "ANY">;
+  region: Exclude<Region, "ANY">;
   /** Relative stay prices; 1 is a typical mid-priced US destination. */
   priceIndex: number;
   /** Months (1-12) a style is actually on offer; styles not listed work year-round. */
@@ -58,15 +58,32 @@ export function mentions(text: string | undefined, destination: string) {
   return phrase(text, city) || (abbreviation.length === 2 && new RegExp(`\\b${abbreviation}\\b`).test(text)) || (!!known && phrase(text, known.state));
 }
 
+/** Whether someone is leaving from this destination's city, so going there isn't a trip for them. */
+export function isHome(departure: string, destination: string) {
+  return phrase(departure, destination.split(",")[0]!.trim());
+}
+
+/**
+ * The part of the country everyone is leaving from, when every departure Accord recognizes agrees.
+ * Anything mixed or unrecognized looks everywhere.
+ */
+export function regionFor(departures: readonly string[]): Region {
+  // Full city and state names only: "leaving from LA" means Los Angeles, not Louisiana.
+  const regions = new Set(departures.flatMap(text => DESTINATIONS
+    .filter(item => phrase(text, item.name.split(",")[0]!) || phrase(text, item.state)).map(item => item.region)));
+  return regions.size === 1 ? [...regions][0]! : "ANY";
+}
+
 /**
  * Accord's own ranking of catalog destinations for a group's anonymous answers. Deterministic.
  * Each pick after the first is discounted for sharing a style with earlier picks, so a minority wish
  * (one skier among beach lovers) still reaches the shortlist.
  */
-export function rankDestinations(input: { region: TripPlan["region"]; styleCounts: Partial<Record<TripStyle, number>>; ideas: string[]; avoid: string[]; months?: number[] }, limit = 3) {
+export function rankDestinations(input: { region: Region; styleCounts: Partial<Record<TripStyle, number>>; ideas: string[]; avoid: string[]; from?: string[]; months?: number[] }, limit = 3) {
   const pool = DESTINATIONS
     .filter(item => input.region === "ANY" || item.region === input.region)
     .filter(item => !input.avoid.some(text => mentions(text, item.name)))
+    .filter(item => !input.from?.some(text => isHome(text, item.name)))
     .map(item => ({ item: { ...item, styles: stylesInSeason(item, input.months ?? []) } }))
     .map(({ item }) => ({ item, fit: item.styles.reduce((sum, style) => sum + (input.styleCounts[style] ?? 0), 0) + 2 * input.ideas.filter(text => mentions(text, item.name)).length }));
   const anyWishes = pool.some(entry => entry.fit > 0);

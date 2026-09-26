@@ -23,22 +23,23 @@ export const ConstraintsSchema = z.object({
   tripStyles: z.array(TripStyleSchema).max(TRIP_STYLES.length).optional(),
   placeIdeas: z.string().trim().max(300).optional(),
   placesToAvoid: z.string().trim().max(300).optional(),
+  /** How long this member would like the trip to be. A wish, not a limit. */
+  nights: z.number().int().min(1).max(14).optional(),
+  leavingFrom: z.string().trim().max(120).optional(),
 }).strict();
 export type Constraints = z.infer<typeof ConstraintsSchema>;
 
-/** Public planning window for a group that hasn't picked where or when yet. */
+/**
+ * A group that hasn't picked where or when yet. The host sets nothing else: dates, length and where to look
+ * all come from everyone's private answers.
+ */
 export const TripPlanSchema = z.object({
-  earliest: day,
-  /** The last day the trip may end. */
-  latest: day,
-  nights: z.number().int().min(1).max(14),
-  region: z.enum(["ANY", "EAST", "CENTRAL", "WEST"]).default("ANY"),
-  from: z.string().trim().max(120).optional(),
   countryCode: z.string().regex(/^[A-Z]{2}$/).default("US"),
-}).strict().refine(plan => plan.latest > plan.earliest, "The window must end after it starts")
-  .refine(plan => (Date.parse(plan.latest) - Date.parse(plan.earliest)) / 86_400_000 >= plan.nights, "The window is shorter than the trip")
-  .refine(plan => (Date.parse(plan.latest) - Date.parse(plan.earliest)) / 86_400_000 <= 120, "Planning windows are limited to 120 days");
+}).strict();
 export type TripPlan = z.infer<typeof TripPlanSchema>;
+export type Region = "ANY" | "EAST" | "CENTRAL" | "WEST";
+/** How far ahead a group can plan; availability beyond this is ignored. */
+export const PLANNING_HORIZON_DAYS = 180;
 /** Public trip parameters the host sets. Private limits never go here. */
 export const TripSchema = z.object({
   destination: z.string().trim().min(2).max(120),
@@ -119,6 +120,8 @@ export const ExtractionSchema = z.object({
     tripStyles: z.array(TripStyleSchema).max(TRIP_STYLES.length).optional(),
     placeIdeas: z.string().max(300).optional(),
     placesToAvoid: z.string().max(300).optional(),
+    nights: z.number().int().optional(),
+    leavingFrom: z.string().max(120).optional(),
   }).strict(),
   privacy: z.object({ reasonPrivate: z.boolean() }).strict(),
   unsupportedHardRequirements: z.array(z.object({ rawText: z.string(), reason: z.string() }).strict()),
