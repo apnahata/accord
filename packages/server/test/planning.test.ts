@@ -193,6 +193,26 @@ test("destination suggestions see only anonymous totals, and can't bring back a 
   assert.equal(closed.trip!.destination, "Bend, OR");
 });
 
+test("a tied vote goes to the better fit and says so, and stays show their own destination's time zone", async () => {
+  const { state, room, alex, priya } = plannedState(async () => [
+    { name: "Bend, OR", timeZone: "America/Los_Angeles", styles: ["MOUNTAINS", "NATURE"], why: "Outdoors." },
+    { name: "Asheville, NC", timeZone: "America/New_York", styles: ["MOUNTAINS"], why: "Mountain town." },
+  ]);
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, tripStyles: ["MOUNTAINS", "NATURE"] }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["MOUNTAINS"] }));
+  await state.autopilot.planNow(room);
+  const [best, other] = state.roomDTO(room, alex.id).planning!.options;
+  const offers = (await state.offers(room)).offers;
+  assert.ok(offers.some(offer => offer.city === "Bend, OR"));
+  for (const offer of offers) assert.equal(offer.timeZone, offer.city === "Bend, OR" ? "America/Los_Angeles" : "America/New_York", offer.city);
+
+  state.autopilot.planner.vote(room, alex.id, other!.id);
+  state.autopilot.planner.vote(room, priya.id, best!.id);
+  await state.autopilot.planner.closeVote(room, "VOTE");
+  assert.equal(state.roomDTO(room, alex.id).trip!.destination, best!.destination);
+  assert.ok(room.events.some(event => event.title.includes(`tie at 1 vote each, so Accord went with the trip that fits the group best: ${best!.destination}`)), "the timeline says the vote was tied");
+});
+
 test("a single workable trip is chosen without a vote, and the host can reopen planning", async () => {
   const { state, room, alex, priya } = plannedState(async () => [{ name: "Asheville, NC", timeZone: "America/New_York", styles: ["MOUNTAINS"], why: "Mountains." }]);
   state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, tripStyles: ["MOUNTAINS"] }));

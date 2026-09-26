@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   applyMerchantMutation, assessOffer, checkMember, demoCatalog, equalShares, materialOfferEquals,
-  DESTINATIONS, MerchantEventSchema, MerchantMutationSchema, OfferSchema, proposalHash, PublicEventSchema, PrivateEventSchema,
+  MerchantEventSchema, MerchantMutationSchema, OfferSchema, proposalHash, PublicEventSchema, PrivateEventSchema,
   type Constraints, type MerchantEvent, type MerchantMutation, type Offer,
   type PublicRoomDTO, type PublicOfferDTO, type PublicProposalDTO, type ProposalEnvelope,
   type PrivateProposalEnvelope, type OffersDTO, type ReceiptDTO, type EventDTO, type PublicChange, type Trip,
@@ -402,7 +402,7 @@ export class AccordState {
     return { offerId: offer.offerId, offerVersion: offer.offerVersion, merchantName: offer.merchantName,
       propertyName: offer.propertyName, city: offer.city, roomType: offer.roomType,
       checkInAt: offer.checkInAt, checkOutAt: offer.checkOutAt, guestCapacity: offer.guestCapacity,
-      timeZone: DESTINATIONS.find(item => item.name === offer.city)?.timeZone ?? room.trip?.timeZone ?? "America/New_York",
+      timeZone: room.planning?.offerZones?.[offer.offerId] ?? room.trip?.timeZone ?? "America/New_York",
       stepFreeVerified: offer.stepFreeVerified,
       cancellationLabel: offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "Full cash refund" : offer.cancellationPolicyCode === "TRAVEL_CREDIT" ? "Travel credit only" : "Non-refundable",
       subtotalCents: offer.subtotalCents, mandatoryFeesCents: offer.mandatoryFeesCents, totalCents: offer.totalCents,

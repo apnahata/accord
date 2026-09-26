@@ -69,7 +69,10 @@ export function DecidedTrip({ room, base, onChange }: { room: PublicRoomDTO; bas
   const winner = planning.options.find(option => option.id === planning.decidedOptionId);
   const [confirming, setConfirming] = useState(false);
   if (!winner) return null;
-  const how = planning.decidedBy === 'ONLY_OPTION' ? 'The only trip that worked for everyone.' : `Picked by the group’s vote (${winner.votes ?? 0} of ${planning.total}).`;
+  const tied = planning.options.some(option => option.id !== winner.id && option.votes === winner.votes);
+  const how = planning.decidedBy === 'ONLY_OPTION' ? 'The only trip that worked for everyone.'
+    : tied ? `The vote was tied at ${winner.votes ?? 0} each, so Accord picked the trip that fits the group best.`
+    : `Picked by the group’s vote (${winner.votes ?? 0} of ${planning.total}).`;
   return <section className="panel decided-trip">
     <div className="section-heading"><p className="eyebrow"><Compass size={13} />Where and when</p><Tag><Check size={13} />Decided</Tag></div>
     <h3>{winner.destination} · {dayRange(winner.checkIn, winner.checkOut)}</h3>

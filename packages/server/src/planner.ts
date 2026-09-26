@@ -20,6 +20,8 @@ export type Planning = {
   windows: DateWindow[];
   destinations: DestinationIdea[];
   options: PlanOption[];
+  /** Offer id → IANA zone of the destination it was searched for. Providers name cities inconsistently. */
+  offerZones?: Record<string, string>;
   /** Member id → option id. Never exposed; the group only sees totals once voting closes. */
   votes: Record<string, string>;
   voteClosesAt?: string;
@@ -99,6 +101,7 @@ export class Planner {
       checkIn: window.checkIn, checkOut: window.checkOut, guests: members.length, timeZone: idea.timeZone }));
     const found = await this.state.searchCandidates(room, trips);
     if (room.planning !== planning) return;
+    planning.offerZones = Object.fromEntries(candidates.flatMap(({ idea }, index) => found[index]!.map(id => [id, idea.timeZone])));
 
     const options: PlanOption[] = [];
     for (const idea of ideas) {
@@ -193,7 +196,9 @@ export class Planner {
 
   async #decide(room: Room, planning: Planning, option: PlanOption, by: NonNullable<Planning["decidedBy"]>) {
     planning.stage = "DECIDED"; planning.decidedOptionId = option.id; planning.decidedBy = by; delete planning.voteClosesAt;
-    const votes = Object.values(planning.votes).filter(vote => vote === option.id).length;
+    const tally = (id: string) => Object.values(planning.votes).filter(vote => vote === id).length;
+    const votes = tally(option.id);
+    const tied = planning.options.some(other => other.id !== option.id && tally(other.id) === votes);
     planning.message = `${option.destination}, ${dayRange(option)}.`;
     room.trip = TripSchema.parse({ destination: option.destination, countryCode: room.plan!.countryCode, checkIn: option.checkIn, checkOut: option.checkOut,
       guests: room.memberIds.length, timeZone: option.timeZone });
@@ -201,7 +206,9 @@ export class Planner {
     delete room.noOption; delete room.widenedFor;
     this.state.emit(room, "PLAN_DECIDED", by === "ONLY_OPTION"
       ? `Only ${option.destination}, ${dayRange(option)} works for everyone, so Accord is going with it.`
-      : `${by === "DEADLINE" ? "Voting closed. " : "Everyone voted. "}The group picked ${option.destination}, ${dayRange(option)} (${votes} of ${room.memberIds.length} votes).`,
+      : `${by === "DEADLINE" ? "Voting closed. " : "Everyone voted. "}${tied
+        ? `It was a tie at ${votes} ${votes === 1 ? "vote" : "votes"} each, so Accord went with the trip that fits the group best: ${option.destination}, ${dayRange(option)}.`
+        : `The group picked ${option.destination}, ${dayRange(option)} (${votes} of ${room.memberIds.length} votes).`}`,
       undefined, ACCORD);
     this.state.touch(room);
     await this.hooks.propose(room);
