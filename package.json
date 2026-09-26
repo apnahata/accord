@@ -10,6 +10,7 @@
     "test:core": "tsx --test packages/domain/test/*.test.ts packages/server/test/*.test.ts",
     "test:mongo": "tsx --env-file-if-exists=.env --test packages/server/test/mongo.test.ts",
     "verify:gemini": "node --env-file-if-exists=.env --import tsx tools/verify-gemini.mjs",
+    "verify:explanations": "node --env-file-if-exists=.env --import tsx tools/verify-explanations.mjs",
     "check": "tsc --noEmit -p packages/domain/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && npm run build -w frontend"
   },
   "devDependencies": { "tsx": "^4.20.6", "typescript": "^5.9.2", "@types/node": "^22.18.6" }

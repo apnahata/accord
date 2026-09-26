@@ -19,6 +19,7 @@ const codeCopy: Record<string, string> = {
   OWN_CONSTRAINT_FAILED: 'This proposal doesn’t meet one of your own requirements, so it can’t be approved from your account.',
   CONSTRAINTS_REQUIRED: 'Confirm your requirements in your private space first.',
   OFFER_VERSION_MISMATCH: 'This offer changed since you loaded it. Refresh to see the latest version.',
+  OFFER_CHANGED: 'The stay changed while Accord was checking it. Refresh to see the current options.',
   MERCHANT_BOOKING_FAILED: 'The demo merchant couldn’t complete the booking. No payment or booking success has been confirmed.',
   PERSISTENCE_UNAVAILABLE: 'Accord couldn’t save this change. Please try again. No success has been confirmed.',
   MEMBER_ALREADY_READY: 'This member has already confirmed their requirements, so they can’t be removed.',
@@ -32,7 +33,7 @@ const codeCopy: Record<string, string> = {
   HOST_CANNOT_LEAVE: 'The host can’t leave the group.',
   ALREADY_BOOKED: 'This group has already booked.',
   TRIP_IN_PAST: 'Choose trip dates in the future.',
-  AI_UNAVAILABLE:'The assistant is unavailable right now. You can still enter your requirements with the form.',
+  AI_UNAVAILABLE: 'Gemini is unavailable right now. Accord’s verified checks still work; you can use the form or try again later.',
 };
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;

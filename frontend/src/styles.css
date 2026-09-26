@@ -44,6 +44,15 @@
 .member-name .member-state{flex-basis:100%}
 .member-list .member-remove{margin:0 0 0 auto;color:#9a4a2f}
 .members-panel .fine{margin:14px 0 0}
+
+.explanation-panel{background:#f2f4eb}
+.explanation-panel>h3,.explanation-story h3{font-size:21px;margin-bottom:9px}
+.explanation-panel>p,.explanation-story>p{font-size:12px;color:#657466}
+.explanation-panel>.button{margin-top:11px}
+.explanation-story ul{padding-left:18px;margin:13px 0 19px}
+.explanation-story li{font-size:12px;line-height:1.7;padding:3px 0}
+.explanation-story h4{margin:20px 0 6px}
+.private-explanation{background:#f4f0e7}
 .intake-note{margin:18px 0}
 .intake-note ul{margin:6px 0;padding-left:18px;font-size:13px}
 .intake-note p{margin:4px 0 0;font-size:13px}
