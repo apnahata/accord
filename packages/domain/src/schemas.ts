@@ -13,6 +13,18 @@ export const ConstraintsSchema = z.object({
 }).strict();
 export type Constraints = z.infer<typeof ConstraintsSchema>;
 
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** Public trip parameters the host sets. Private limits never go here. */
+export const TripSchema = z.object({
+  destination: z.string().trim().min(2).max(120),
+  countryCode: z.string().regex(/^[A-Z]{2}$/).default("US"),
+  checkIn: day, checkOut: day,
+  guests: z.number().int().min(1).max(8),
+  timeZone: z.string().min(1).max(64).default("America/New_York"),
+}).strict().refine(trip => trip.checkOut > trip.checkIn, "Check-out must be after check-in")
+  .refine(trip => (Date.parse(trip.checkOut) - Date.parse(trip.checkIn)) / 86_400_000 <= 14, "Stays are limited to 14 nights");
+export type Trip = z.infer<typeof TripSchema>;
+
 export const OfferSchema = z.object({
   offerId: z.string().min(1),
   offerVersion: z.string().min(1),
@@ -37,6 +49,14 @@ export const OfferSchema = z.object({
   walkable: z.boolean(),
   nearActivities: z.boolean(),
   quiet: z.boolean(),
+  /** Provenance. Absent on the controlled demo catalog. */
+  source: z.enum(["DEMO", "LITEAPI", "GOOGLE_HOTELS"]).optional(),
+  bookingMode: z.enum(["SIMULATED", "SANDBOX", "EXTERNAL"]).optional(),
+  externalUrl: z.url().optional(),
+  imageUrl: z.url().optional(),
+  address: z.string().max(300).optional(),
+  rating: z.number().min(0).max(10).optional(),
+  reviewCount: z.number().int().nonnegative().optional(),
 }).strict().refine(value => value.subtotalCents + value.mandatoryFeesCents === value.totalCents, "Total must include mandatory fees");
 export type Offer = z.infer<typeof OfferSchema>;
 

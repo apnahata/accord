@@ -1,5 +1,5 @@
 /** Server-owned wire contracts. Public DTOs contain public fields only. */
-import type { Constraints } from "./schemas.js";
+import type { Constraints, Trip } from "./schemas.js";
 export type PublicRoomDTO = {
   id: string; name: string; goal: string;
   status: 'COLLECTING' | 'SEARCHING' | 'PROPOSAL_ACTIVE' | 'STALE' | 'BOOKED';
@@ -7,7 +7,11 @@ export type PublicRoomDTO = {
   /** Names and confirmation status only; requirements themselves are never included. */
   members: Array<{ id: string; displayName: string; ready: boolean; isHost: boolean; isYou: boolean }>;
   viewerIsHost: boolean;
+  /** Present when the host created the room with real trip details (live search). */
+  trip?: Trip;
+  lastSearch?: { searchedAt: string; providers: Array<{ provider: string; status: string; count: number }> };
 };
+export type StayResearchDTO = { sourceLabel: string; pros: string[]; cons: string[]; nearby: string[]; summary?: string };
 export type PublicOfferDTO = {
   offerId: string; offerVersion: string; merchantName: string; propertyName: string;
   city: string; roomType: string; checkInAt: string; checkOutAt: string;
@@ -15,6 +19,11 @@ export type PublicOfferDTO = {
   subtotalCents: number; mandatoryFeesCents: number; totalCents: number;
   equalShareCents: number; available: boolean; expiresAt: string; feasible: boolean;
   publicFeasibilityMessage: string;
+  source: 'DEMO' | 'LITEAPI' | 'GOOGLE_HOTELS';
+  sourceLabel: string;
+  bookingMode: 'SIMULATED' | 'SANDBOX' | 'EXTERNAL';
+  imageUrl?: string; address?: string; rating?: number; reviewCount?: number; externalUrl?: string;
+  research?: StayResearchDTO;
   stability?: { observationCount: number; materialChangeCount: number; label: 'STABLE' | 'MIXED' | 'VOLATILE' };
 };
 export type PublicProposalDTO = {
@@ -58,7 +67,8 @@ export type OffersDTO = {
   matrix?: { offers: Array<{ id: string; label: string }>; rows: Array<{ id: string; label: string; results: Array<'PASS' | 'FAIL' | 'UNKNOWN'> }> };
 };
 export type ReceiptDTO = {
-  status: 'CONFIRMED'; bookingReference: string; bookedAt: string;
+  /** HANDOFF: the group approved an external listing; the host completes the purchase on the listing site. */
+  status: 'CONFIRMED' | 'HANDOFF'; bookingReference: string; bookedAt: string; externalUrl?: string;
   providerModeLabel: string; confirmationLabel: string; guestCount: number;
   proposal: PublicProposalDTO;
 };

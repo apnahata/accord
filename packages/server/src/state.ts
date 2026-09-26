@@ -5,11 +5,12 @@ import {
   MerchantEventSchema, MerchantMutationSchema, OfferSchema, proposalHash, PublicEventSchema, PrivateEventSchema,
   type Constraints, type MerchantEvent, type MerchantMutation, type Offer,
   type PublicRoomDTO, type PublicOfferDTO, type PublicProposalDTO, type ProposalEnvelope,
-  type PrivateProposalEnvelope, type OffersDTO, type ReceiptDTO, type EventDTO,
+  type PrivateProposalEnvelope, type OffersDTO, type ReceiptDTO, type EventDTO, type PublicChange, type Trip,
 } from "@accord/domain";
 import { Merchant, type MerchantContract } from "../../integrations/src/merchant.js";
 import { RoomStreams } from "../../integrations/src/realtime.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
+import type { ExternalRef, GoogleHotels, LiteApi, LiteRef, LiveStay, ProviderResult, StayResearch } from "./stays.js";
 import { SESSION_TTL_SECONDS, type MongoPersistence, type RoomAggregate, type SealedValue, type SessionRecord } from "./persistence.js";
 
 export class AppError extends Error {
@@ -26,11 +27,24 @@ type Proposal = {
   };
   state: "OPEN" | "READY_TO_EXECUTE" | "STALE" | "BOOKED" | "CANCELLED";
   approvals: Map<string, Approval>; authorizations: Map<string, Authorization>;
+  /** Provider handle for the approved stay (not part of the hashed snapshot; never private). */
+  providerRef?: LiteRef | ExternalRef;
 };
+type LiveSearch = {
+  searchedAt: string; googleSearchedAt?: string; offerIds: string[]; providers: ProviderResult[];
+  research: Record<string, StayResearch>; refs: Record<string, LiteRef | ExternalRef>;
+};
+type Booking = { reference: string; confirmedAt: string; proposalId: string; mode?: "SIMULATED" | "SANDBOX" | "EXTERNAL"; externalUrl?: string; hotelConfirmationCode?: string };
+export type StayProviders = { liteApi?: LiteApi; google?: GoogleHotels; summarize?: (facts: unknown) => Promise<string | undefined> };
+const GOOGLE_CACHE_MS = 30 * 60 * 1000;
+const money = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
+const cancellationLabel = (offer: Offer) => offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "Full cash refund" : offer.cancellationPolicyCode === "TRAVEL_CREDIT" ? "Travel credit only" : "Non-refundable";
+const sourceLabel = (offer: Offer) => offer.source === "LITEAPI" ? "LiteAPI hotel · bookable in sandbox" : offer.source === "GOOGLE_HOTELS" ? `Google Hotels · book on ${offer.merchantName}` : "Demo inventory";
 type Room = {
   id: string; name: string; goal: string; inviteToken: string; hostId: string;
   memberIds: string[]; createdAt: string; activeProposalId?: string; version: number;
-  events: EventDTO[]; booking?: { reference: string; confirmedAt: string; proposalId: string };
+  events: EventDTO[]; booking?: Booking;
+  trip?: Trip; search?: LiveSearch; searching?: boolean;
 };
 
 const merchantContract: MerchantContract<Offer, MerchantMutation, MerchantEvent> = {
@@ -69,7 +83,7 @@ export class AccordState {
   #removedSessions = new Set<string>();
 
   /** Without persistence, state is process memory only. With Mongo, memory is a write-through working copy. */
-  constructor(readonly persistence?: MongoPersistence) {
+  constructor(readonly persistence?: MongoPersistence, readonly providers: StayProviders = {}) {
     this.store = persistence ? persistence.merchantStore as MerchantBackend : new MemoryMerchantStore<Offer, MerchantEvent>();
     const merchant = this.merchant = new Merchant(this.store, merchantContract);
     this.ready = (async () => { if (persistence) await this.#hydrate(); await merchant.seed(demoCatalog()); })();
@@ -83,9 +97,9 @@ export class AccordState {
     const session = value ? this.sessions.get(hashToken(value)) : undefined;
     return session && Date.parse(session.createdAt) + SESSION_TTL_SECONDS * 1000 > Date.now() ? session : undefined;
   }
-  createRoom(name: string, goal: string, displayName: string) {
+  createRoom(name: string, goal: string, displayName: string, trip?: Trip) {
     const roomId = randomUUID(), memberId = randomUUID(), inviteToken = token(), sessionToken = token();
-    const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [] };
+    const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [], ...(trip ? { trip } : {}) };
     this.rooms.set(roomId, room); this.#addInvitation(hashToken(inviteToken), roomId);
     this.members.set(memberId, { id: memberId, roomId, displayName, constraints: null, capsuleVersion: 0 });
     this.#addSession(hashToken(sessionToken), roomId, memberId);
@@ -123,13 +137,15 @@ export class AccordState {
   roomDTO(room: Room, viewerId: string): PublicRoomDTO {
     const proposal = room.activeProposalId ? this.proposals.get(room.activeProposalId) : undefined;
     return { id: room.id, name: room.name, goal: room.goal,
-      status: room.booking ? "BOOKED" : proposal?.state === "STALE" ? "STALE" : proposal ? "PROPOSAL_ACTIVE" : "COLLECTING",
+      status: room.booking ? "BOOKED" : room.searching ? "SEARCHING" : proposal?.state === "STALE" ? "STALE" : proposal ? "PROPOSAL_ACTIVE" : "COLLECTING",
       memberCount: room.memberIds.length,
       readyMemberCount: room.memberIds.filter(id => this.members.get(id)?.constraints).length,
       activeProposalId: room.activeProposalId,
       members: room.memberIds.map(id => { const member = this.members.get(id)!;
         return { id, displayName: member.displayName, ready: Boolean(member.constraints), isHost: id === room.hostId, isYou: id === viewerId }; }),
-      viewerIsHost: viewerId === room.hostId };
+      viewerIsHost: viewerId === room.hostId,
+      ...(room.trip ? { trip: room.trip } : {}),
+      ...(room.search ? { lastSearch: { searchedAt: room.search.searchedAt, providers: room.search.providers.map(({ provider, status, count }) => ({ provider, status, count })) } } : {}) };
   }
   /** Host-only. Only members who have not confirmed requirements can be removed; their sessions are revoked. */
   removeMember(room: Room, host: Member, memberId: string) {
@@ -138,11 +154,21 @@ export class AccordState {
     if (!target) throw new AppError(404, "MEMBER_NOT_FOUND");
     if (target.id === room.hostId) throw new AppError(409, "CANNOT_REMOVE_HOST");
     if (target.constraints) throw new AppError(409, "MEMBER_ALREADY_READY");
+    this.#dropMember(room, memberId);
+    this.emit(room, "MEMBER_REMOVED", "The host removed a member who hadn’t confirmed requirements.");
+  }
+  /** Any non-host member may leave. Their private requirements and sessions are deleted; any proposal becomes stale. */
+  leave(room: Room, member: Member) {
+    if (member.id === room.hostId) throw new AppError(409, "HOST_CANNOT_LEAVE");
+    if (room.booking) throw new AppError(409, "ALREADY_BOOKED");
+    this.#dropMember(room, member.id);
+    this.emit(room, "MEMBER_LEFT", "A member left the group. Shares and approvals need a fresh look.");
+  }
+  #dropMember(room: Room, memberId: string) {
     room.memberIds = room.memberIds.filter(id => id !== memberId);
     this.members.delete(memberId); this.#removedMembers.add(memberId);
     for (const [id, session] of this.sessions) if (session.memberId === memberId) { this.sessions.delete(id); this.#dirtySessions.delete(id); this.#removedSessions.add(id); }
     this.stale(room, "The member set changed.");
-    this.emit(room, "MEMBER_REMOVED", "The host removed a member who hadn’t confirmed requirements.");
   }
   confirmConstraints(room: Room, member: Member, constraints: Constraints) {
     member.constraints = structuredClone(constraints); member.capsuleVersion++; member.confirmedAt = nowIso();
@@ -154,13 +180,79 @@ export class AccordState {
     await this.ready;
     return this.store.transaction(async tx => (await tx.getOffer(id))?.offer);
   }
-  async allOffers(): Promise<Offer[]> {
+  /** Rooms with trip details use their live search results; legacy rooms use the controlled demo catalog. */
+  offerIdsFor(room: Room) { return room.trip ? room.search?.offerIds ?? [] : this.catalogIds; }
+  async allOffers(ids: readonly string[] = this.catalogIds): Promise<Offer[]> {
     await this.ready;
     // Sequential: Mongo transactions do not support concurrent operations on one session.
     return this.store.transaction(async tx => {
       const offers: Offer[] = [];
-      for (const id of this.catalogIds) offers.push((await tx.getOffer(id))!.offer);
+      for (const id of ids) { const record = await tx.getOffer(id); if (record) offers.push(record.offer); }
       return offers;
+    });
+  }
+  /** Runs the live providers, stores their offers as versioned merchant records, and stales an approved offer that changed. */
+  async searchLive(room: Room) {
+    const trip = room.trip!;
+    const { liteApi, google } = this.providers;
+    if (!liteApi && !google) throw new AppError(503, "STAY_SEARCH_UNAVAILABLE");
+    room.searching = true;
+    this.emit(room, "SEARCH_STARTED", `Searching live stays in ${trip.destination} for ${trip.checkIn} to ${trip.checkOut}.`);
+    try {
+      const previous = room.search;
+      const reuseGoogle = !!previous?.googleSearchedAt && Date.now() - Date.parse(previous.googleSearchedAt) < GOOGLE_CACHE_MS;
+      const run = async (provider: ProviderResult["provider"], client: { search(trip: Trip): Promise<LiveStay[]> } | undefined) => {
+        if (!client) return { result: { provider, status: "UNCONFIGURED", count: 0 } as ProviderResult, stays: [] as LiveStay[] };
+        try { const stays = await client.search(trip); return { result: { provider, status: "OK", count: stays.length } as ProviderResult, stays }; }
+        catch (error) { return { result: { provider, status: "FAILED", count: 0, detail: String((error as Error).message).slice(0, 160) } as ProviderResult, stays: [] as LiveStay[] }; }
+      };
+      const [lite, fresh] = await Promise.all([run("LITEAPI", liteApi), reuseGoogle ? Promise.resolve(undefined) : run("GOOGLE_HOTELS", google)]);
+      const googleIds = reuseGoogle ? previous!.offerIds.filter(id => id.startsWith("gh-")) : fresh!.stays.map(stay => stay.offer.offerId);
+      const googleResult: ProviderResult = reuseGoogle ? { provider: "GOOGLE_HOTELS", status: "OK", count: googleIds.length, detail: "cached" } : fresh!.result;
+      const label = (result: ProviderResult, noun: string) => result.status === "OK" ? `${result.count} ${noun}${result.detail === "cached" ? " (cached from the last 30 minutes)" : ""}` : result.status === "FAILED" ? `search failed, continuing without it` : "not configured";
+      this.emit(room, "SEARCH_PROVIDER", `LiteAPI: ${label(lite.result, "bookable hotel rates")}.`);
+      this.emit(room, "SEARCH_PROVIDER", `Google Hotels: ${label(googleResult, "vacation rentals")}.`);
+      const stays = [...lite.stays, ...(fresh?.stays ?? [])];
+      if (!stays.length && !googleIds.length) {
+        if (previous?.offerIds.length) { this.emit(room, "SEARCH_FALLBACK", "Live search returned nothing; showing the last successful results."); return; }
+        throw new AppError(503, "STAY_SEARCH_FAILED");
+      }
+      await this.#upsertLive(stays.map(stay => stay.offer));
+      const keep = <T>(source: Record<string, T> | undefined, ids: string[]) => Object.fromEntries(ids.flatMap(id => source?.[id] ? [[id, source[id]!]] : []));
+      room.search = {
+        searchedAt: nowIso(), googleSearchedAt: reuseGoogle ? previous!.googleSearchedAt : fresh?.result.status === "OK" ? nowIso() : previous?.googleSearchedAt,
+        offerIds: [...stays.filter(stay => stay.offer.source === "LITEAPI").map(stay => stay.offer.offerId), ...googleIds],
+        providers: [lite.result, googleResult],
+        research: { ...keep(previous?.research, googleIds), ...Object.fromEntries(stays.map(stay => [stay.offer.offerId, stay.research])) },
+        refs: { ...keep(previous?.refs, googleIds), ...Object.fromEntries(stays.map(stay => [stay.offer.offerId, stay.ref])) },
+      };
+      const active = room.activeProposalId ? this.proposals.get(room.activeProposalId) : undefined;
+      if (active && active.state !== "BOOKED") {
+        const current = await this.currentOffer(active.snapshot.offer.offerId);
+        if (current && !materialOfferEquals(current, active.snapshot.offer)) this.stale(room, "Live price or terms changed.");
+      }
+    } finally { room.searching = false; this.#dirtyRooms.add(room.id); }
+  }
+  async #upsertLive(offers: Offer[]) {
+    await this.store.transaction(async tx => {
+      for (const offer of offers) {
+        const existing = await tx.getOffer(offer.offerId);
+        if (!existing) { await tx.putOffer(offer.offerId, { offer, original: structuredClone(offer), failNextBooking: false, booked: false }); continue; }
+        if (existing.booked) continue;
+        const candidate = { ...offer, offerVersion: existing.offer.offerVersion, expiresAt: existing.offer.expiresAt };
+        const next = materialOfferEquals(candidate, existing.offer)
+          ? { ...existing.offer, expiresAt: offer.expiresAt, imageUrl: offer.imageUrl, rating: offer.rating, reviewCount: offer.reviewCount }
+          : { ...offer, offerVersion: `v${Number(existing.offer.offerVersion.slice(1)) + 1}` };
+        await tx.putOffer(offer.offerId, { ...existing, offer: OfferSchema.parse(next) });
+      }
+    });
+  }
+  /** Records a provider-observed change as a new offer version. */
+  async #reviseOffer(offerId: string, changes: Partial<Offer>) {
+    await this.store.transaction(async tx => {
+      const record = await tx.getOffer(offerId);
+      if (!record) return;
+      await tx.putOffer(offerId, { ...record, offer: OfferSchema.parse({ ...record.offer, ...changes, offerVersion: `v${Number(record.offer.offerVersion.slice(1)) + 1}` }) });
     });
   }
   private confirmed(room: Room) {
@@ -187,23 +279,38 @@ export class AccordState {
       cancellationLabel: offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "Full cash refund" : offer.cancellationPolicyCode === "TRAVEL_CREDIT" ? "Travel credit only" : "Non-refundable",
       subtotalCents: offer.subtotalCents, mandatoryFeesCents: offer.mandatoryFeesCents, totalCents: offer.totalCents,
       equalShareCents: Math.ceil(offer.totalCents / room.memberIds.length), available: offer.available, expiresAt: offer.expiresAt,
-      feasible, publicFeasibilityMessage: feasible ? "Meets every confirmed requirement." : "Does not meet all confirmed requirements." };
+      feasible, publicFeasibilityMessage: feasible ? "Meets every confirmed requirement." : "Does not meet all confirmed requirements.",
+      source: offer.source ?? "DEMO", sourceLabel: sourceLabel(offer), bookingMode: offer.bookingMode ?? "SIMULATED",
+      ...(offer.imageUrl ? { imageUrl: offer.imageUrl } : {}), ...(offer.address ? { address: offer.address } : {}),
+      ...(offer.rating !== undefined ? { rating: offer.rating } : {}), ...(offer.reviewCount !== undefined ? { reviewCount: offer.reviewCount } : {}),
+      ...(offer.externalUrl ? { externalUrl: offer.externalUrl } : {}),
+      ...(room.search?.research[offer.offerId] ? { research: room.search.research[offer.offerId] } : {}) };
   }
   async offers(room: Room): Promise<OffersDTO> {
-    const members = this.confirmed(room), offers = await this.allOffers();
+    const members = this.confirmed(room), offers = await this.allOffers(this.offerIdsFor(room));
     const assessments = offers.map(offer => ({ offer, assessed: assessOffer(offer, members) }));
     const feasible = assessments.filter(item => item.assessed.feasible);
     const minTotal = feasible.length ? Math.min(...feasible.map(item => item.offer.totalCents)) : 0;
     const ranked = [...feasible].sort((a, b) => this.score(b.offer, members, minTotal) - this.score(a.offer, members, minTotal) || a.offer.totalCents - b.offer.totalCents);
     const recommended = ranked[0]?.offer;
-    return { inventoryLabel, offers: assessments.map(item => this.offerDTO(item.offer, room, item.assessed.feasible)),
-      recommendedOfferId: recommended?.offerId,
-      recommendationReasons: recommended ? ["Meets every confirmed requirement.", "Matches confirmed group preferences."] : [],
-      funnel: [{ label: "Demo stays checked", count: offers.length }, { label: "Current and available", count: offers.filter(offer => offer.available).length }, { label: "Suitable for everyone", count: feasible.length }] };
+    const rank = new Map(ranked.map((item, index) => [item.offer.offerId, index]));
+    const ordered = [...assessments].sort((a, b) => (rank.get(a.offer.offerId) ?? 1e6) - (rank.get(b.offer.offerId) ?? 1e6) || a.offer.totalCents - b.offer.totalCents);
+    const live = !!room.trip;
+    const reasons = !recommended ? [] : [
+      "Meets every confirmed requirement.",
+      ...(live ? [`Real listing: ${sourceLabel(recommended)}.`] : []),
+      ...(recommended.rating !== undefined ? [`Guest rating ${recommended.rating}/10${recommended.reviewCount ? ` from ${recommended.reviewCount.toLocaleString("en-US")} reviews` : ""}.`] : []),
+      "Matches confirmed group preferences.",
+    ];
+    return { inventoryLabel: live ? `Live results: LiteAPI hotels (sandbox booking) and Google Hotels vacation rentals via SerpApi${room.search ? ` · searched ${new Date(room.search.searchedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: room.trip!.timeZone })}` : " · not searched yet"}` : inventoryLabel,
+      offers: ordered.map(item => this.offerDTO(item.offer, room, item.assessed.feasible)),
+      recommendedOfferId: recommended?.offerId, recommendationReasons: reasons,
+      funnel: [{ label: live ? "Live stays checked" : "Demo stays checked", count: offers.length }, { label: "Current and available", count: offers.filter(offer => offer.available).length }, { label: "Suitable for everyone", count: feasible.length }] };
   }
   async solve(room: Room): Promise<ProposalEnvelope | { noSolution: true }> {
     const members = this.confirmed(room);
-    this.emit(room, "SOLVE_STARTED", "Accord started checking current demo stays.");
+    if (room.trip) await this.searchLive(room);
+    else this.emit(room, "SOLVE_STARTED", "Accord started checking current demo stays.");
     const data = await this.offers(room);
     if (!data.recommendedOfferId) { this.emit(room, "SOLVE_COMPLETED", "No current stay satisfies every confirmed requirement."); return { noSolution: true }; }
     const offer = (await this.currentOffer(data.recommendedOfferId))!;
@@ -214,9 +321,12 @@ export class AccordState {
       offer: structuredClone(offer), contributionsCents: assessment.shares,
       privateCapsuleVersions: Object.fromEntries(members.map(member => [member.id, member.capsuleVersion])),
       createdAt, expiresAt: offer.expiresAt };
-    const proposal: Proposal = { id, roomId: room.id, version, hash: proposalHash(snapshot), snapshot, state: "OPEN", approvals: new Map(), authorizations: new Map() };
+    const providerRef = room.search?.refs[offer.offerId];
+    const proposal: Proposal = { id, roomId: room.id, version, hash: proposalHash(snapshot), snapshot, state: "OPEN", approvals: new Map(), authorizations: new Map(), ...(providerRef ? { providerRef } : {}) };
     this.proposals.set(id, proposal); room.activeProposalId = id;
-    this.emit(room, "SOLVE_COMPLETED", `Accord evaluated ${data.offers.length} demo stays.`);
+    const suitable = data.offers.filter(item => item.feasible).length;
+    this.emit(room, "SOLVE_COMPLETED", room.trip ? `${suitable} of ${data.offers.length} live stays meet every confirmed requirement.` : `Accord evaluated ${data.offers.length} demo stays.`);
+    if (room.trip) void this.#summarize(room, data.offers.filter(item => item.feasible).slice(0, 3).map(item => item.offerId));
     this.emit(room, "PROPOSAL_CREATED", `Proposal v${version} opened.`, id);
     return this.publicProposal(proposal);
   }
@@ -238,7 +348,10 @@ export class AccordState {
       expiresAt: proposal.snapshot.expiresAt, solana: { status: "NOT_RECORDED" } };
     return { roomId: room.id, proposal: publicProposal,
       paymentModeLabel: "Simulated contribution authorization — no card charged",
-      bookingModeLabel: "Controlled demo merchant booking — no real accommodation reserved", inventoryLabel,
+      bookingModeLabel: offer.source === "LITEAPI" ? "LiteAPI sandbox booking — the live price is re-checked first; no card is charged"
+        : offer.source === "GOOGLE_HOTELS" ? `Approved listing — the host completes the purchase on ${offer.merchantName}`
+        : "Controlled demo merchant booking — no real accommodation reserved",
+      inventoryLabel: room.trip ? "Live provider inventory" : inventoryLabel,
       canExecute: proposal.state === "READY_TO_EXECUTE" };
   }
   async privateProposal(proposal: Proposal, member: Member): Promise<PrivateProposalEnvelope> {
@@ -246,11 +359,30 @@ export class AccordState {
     const publicPart = this.publicProposal(proposal);
     const current = proposal.state === "STALE" ? await this.currentOffer(proposal.snapshot.offer.offerId) : undefined;
     const offer = current ?? proposal.snapshot.offer;
-    const share = equalShares(offer.totalCents, proposal.snapshot.memberIds)[member.id]!;
+    // A stale proposal is judged against today's group: if someone left, everyone's share went up.
+    const room = this.rooms.get(proposal.roomId)!;
+    const group = proposal.state === "STALE" && room.memberIds.includes(member.id) ? room.memberIds : proposal.snapshot.memberIds;
+    const share = equalShares(offer.totalCents, group)[member.id]!;
     return { ...publicPart, myContributionCents: proposal.snapshot.contributionsCents[member.id]!,
       myApprovalStatus: proposal.approvals.get(member.id)?.status ?? "PENDING",
       myPaymentStatus: proposal.authorizations.get(member.id)?.status ?? "PENDING",
-      myConstraintChecks: checkMember(offer, member.constraints!, share, proposal.snapshot.memberIds.length) };
+      myConstraintChecks: checkMember(offer, member.constraints!, share, group.length) };
+  }
+  /** Public view plus a public-only diff explaining why a stale proposal can no longer be used. */
+  async proposalView(proposal: Proposal): Promise<ProposalEnvelope> {
+    const envelope = this.publicProposal(proposal);
+    if (proposal.state !== "STALE") return envelope;
+    const room = this.rooms.get(proposal.roomId)!, before = proposal.snapshot.offer;
+    const after = await this.currentOffer(before.offerId) ?? before;
+    const changes: PublicChange[] = [];
+    if (after.totalCents !== before.totalCents) changes.push({ label: "Total price", before: money(before.totalCents), after: money(after.totalCents) });
+    if (after.cancellationPolicyCode !== before.cancellationPolicyCode) changes.push({ label: "Cancellation", before: cancellationLabel(before), after: cancellationLabel(after) });
+    if (after.available !== before.available) changes.push({ label: "Availability", before: "Available", after: after.available ? "Available" : "No longer available" });
+    if (after.roomType !== before.roomType) changes.push({ label: "Room", before: before.roomType, after: after.roomType });
+    if (after.checkOutAt !== before.checkOutAt) changes.push({ label: "Checkout", before: before.checkOutAt, after: after.checkOutAt });
+    if (room.memberIds.length !== proposal.snapshot.memberIds.length) changes.push({ label: "Group size", before: `${proposal.snapshot.memberIds.length} people`, after: `${room.memberIds.length} people` });
+    if (room.memberIds.length && room.memberIds.length !== proposal.snapshot.memberIds.length) changes.push({ label: "Equal share", before: money(Math.ceil(before.totalCents / proposal.snapshot.memberIds.length)), after: money(Math.ceil(after.totalCents / room.memberIds.length)) });
+    return { ...envelope, changes };
   }
   consent(proposal: Proposal, room: Room, member: Member, input: { proposalHash: string; version: number; amountCents: number }) {
     if (room.activeProposalId !== proposal.id || proposal.state === "STALE" || proposal.state === "BOOKED") throw new AppError(409, "PROPOSAL_STALE");
@@ -287,6 +419,13 @@ export class AccordState {
     if (!current || !materialOfferEquals(current, proposal.snapshot.offer) || !assessOffer(current, proposal.snapshot.memberIds.map(id => ({ id, constraints: this.members.get(id)!.constraints! }))).feasible) {
       this.stale(room, "Merchant offer changed before booking."); throw new AppError(409, "PROPOSAL_STALE");
     }
+    if (current.source === "LITEAPI") return this.#bookLiteApi(proposal, room, member, current, key);
+    if (current.source === "GOOGLE_HOTELS") {
+      room.booking = { reference: `approved-${proposal.hash.slice(0, 10)}`, confirmedAt: nowIso(), proposalId: proposal.id, mode: "EXTERNAL", ...(current.externalUrl ? { externalUrl: current.externalUrl } : {}) };
+      proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
+      this.emit(room, "BOOKING_HANDOFF", `Everyone approved the exact listing. The host completes the purchase on ${current.merchantName}.`, proposal.id);
+      return this.receipt(room);
+    }
     let booking;
     try { booking = await this.merchant.execute({ offerId: current.offerId, expectedOfferVersion: current.offerVersion, idempotencyKey: key }); }
     catch { throw new AppError(409, "MERCHANT_BOOKING_FAILED"); }
@@ -296,12 +435,72 @@ export class AccordState {
     catch { /* Booking is confirmed. A failed optional event fanout cannot erase the receipt. */ }
     return this.receipt(room);
   }
+  /** Re-quotes the exact room with LiteAPI; any price or terms change stales consent instead of booking. */
+  async #bookLiteApi(proposal: Proposal, room: Room, host: Member, offer: Offer, key: string) {
+    const liteApi = this.providers.liteApi, ref = proposal.providerRef;
+    if (!liteApi || !room.trip || ref?.provider !== "LITEAPI") throw new AppError(503, "BOOKING_PROVIDER_UNAVAILABLE");
+    return this.#serialize(async () => {
+      if (room.booking?.proposalId === proposal.id) return this.receipt(room);
+      let quote;
+      try { quote = await liteApi.requote(room.trip!, ref); } catch { throw new AppError(503, "BOOKING_PROVIDER_UNAVAILABLE"); }
+      if (!quote) { await this.#reviseOffer(offer.offerId, { available: false }); this.stale(room, "The room is no longer offered."); throw new AppError(409, "PROPOSAL_STALE"); }
+      if (quote.totalCents !== offer.totalCents || quote.refundableTag !== ref.refundableTag) {
+        await this.#reviseOffer(offer.offerId, { totalCents: quote.totalCents, subtotalCents: quote.totalCents, mandatoryFeesCents: 0,
+          ...(quote.refundableTag !== ref.refundableTag ? { cancellationPolicyCode: "NON_REFUNDABLE" as const, fullRefundDeadline: undefined } : {}) });
+        this.stale(room, "The live price or terms changed before booking."); throw new AppError(409, "PROPOSAL_STALE");
+      }
+      let result;
+      try {
+        const prebook = await liteApi.prebook(quote.offerId);
+        if (Math.abs(prebook.priceCents - offer.totalCents) > 1 || prebook.cancellationChanged) {
+          await this.#reviseOffer(offer.offerId, { totalCents: prebook.priceCents, subtotalCents: prebook.priceCents, mandatoryFeesCents: 0 });
+          this.stale(room, "The price changed at checkout."); throw new AppError(409, "PROPOSAL_STALE");
+        }
+        const [firstName, ...rest] = host.displayName.trim().split(/\s+/);
+        result = await liteApi.book({ prebookId: prebook.prebookId, firstName: firstName || "Accord", lastName: rest.join(" ") || "Guest", email: "sandbox-guest@example.com", clientReference: key.slice(0, 64) });
+      } catch (error) { if (error instanceof AppError) throw error; throw new AppError(409, "MERCHANT_BOOKING_FAILED"); }
+      if (result.status !== "CONFIRMED") throw new AppError(409, "MERCHANT_BOOKING_FAILED");
+      room.booking = { reference: result.bookingId, confirmedAt: nowIso(), proposalId: proposal.id, mode: "SANDBOX", ...(result.hotelConfirmationCode ? { hotelConfirmationCode: result.hotelConfirmationCode } : {}) };
+      proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
+      this.emit(room, "BOOKING_CONFIRMED", `LiteAPI sandbox booking ${result.bookingId} confirmed at the approved price.`, proposal.id);
+      return this.receipt(room);
+    });
+  }
+  #bookingTail: Promise<unknown> = Promise.resolve();
+  #serialize<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.#bookingTail.then(run, run);
+    this.#bookingTail = next.catch(() => undefined);
+    return next;
+  }
+  /** Optional AI summary from public listing facts only; never affects feasibility or ranking. */
+  async #summarize(room: Room, offerIds: string[]) {
+    const summarize = this.providers.summarize;
+    if (!summarize || !room.search) return;
+    try {
+      const offers = await this.allOffers(offerIds);
+      await Promise.all(offers.map(async offer => {
+        const research = room.search?.research[offer.offerId];
+        if (!research || research.summary) return;
+        const summary = await summarize({ name: offer.propertyName, city: offer.city, room: offer.roomType, rating: offer.rating, reviews: offer.reviewCount,
+          cancellation: cancellationLabel(offer), walkable: offer.walkable, nearActivities: offer.nearActivities, pros: research.pros, cons: research.cons, nearby: research.nearby }).catch(() => undefined);
+        if (summary) research.summary = summary;
+      }));
+      this.emit(room, "RESEARCH_READY", "Accord added research notes to the top stays.");
+      await this.flush();
+    } catch { /* Research is optional. */ }
+  }
   receipt(room: Room): ReceiptDTO {
     if (!room.booking) throw new AppError(404, "BOOKING_NOT_FOUND");
-    const proposal = this.proposals.get(room.booking.proposalId)!;
-    return { status: "CONFIRMED", bookingReference: room.booking.reference, bookedAt: room.booking.confirmedAt,
-      providerModeLabel: "SIMULATED — no card charged", confirmationLabel: "Controlled demo merchant booking only; no real accommodation reserved.",
-      guestCount: proposal.snapshot.memberIds.length, proposal: this.publicProposal(proposal).proposal };
+    const proposal = this.proposals.get(room.booking.proposalId)!, offer = proposal.snapshot.offer;
+    const base = { bookingReference: room.booking.reference, bookedAt: room.booking.confirmedAt, guestCount: proposal.snapshot.memberIds.length, proposal: this.publicProposal(proposal).proposal };
+    if (room.booking.mode === "SANDBOX") return { ...base, status: "CONFIRMED",
+      providerModeLabel: "LiteAPI SANDBOX — no card charged",
+      confirmationLabel: `Booked through LiteAPI's sandbox at the exact price everyone approved${room.booking.hotelConfirmationCode ? ` (hotel code ${room.booking.hotelConfirmationCode})` : ""}. Sandbox bookings take no payment. Member contributions are simulated.` };
+    if (room.booking.mode === "EXTERNAL") return { ...base, status: "HANDOFF", ...(room.booking.externalUrl ? { externalUrl: room.booking.externalUrl } : {}),
+      providerModeLabel: `Complete on ${offer.merchantName}`,
+      confirmationLabel: `Everyone approved this exact listing at ${money(offer.totalCents)}. Accord doesn't sell this listing: the host completes the purchase on ${offer.merchantName}. Member contributions are simulated.` };
+    return { ...base, status: "CONFIRMED",
+      providerModeLabel: "SIMULATED — no card charged", confirmationLabel: "Controlled demo merchant booking only; no real accommodation reserved." };
   }
   stale(room: Room, detail: string) {
     const proposal = room.activeProposalId ? this.proposals.get(room.activeProposalId) : undefined;
@@ -356,7 +555,7 @@ export class AccordState {
         return { _id, ...fields, sealedConstraints: constraints ? sealer.seal(constraints) : null };
       }),
       proposals: [...this.proposals.values()].filter(proposal => proposal.roomId === room.id).map(proposal => ({
-        _id: proposal.id, roomId: proposal.roomId, version: proposal.version, hash: proposal.hash, state: proposal.state,
+        _id: proposal.id, roomId: proposal.roomId, version: proposal.version, hash: proposal.hash, state: proposal.state, providerRef: proposal.providerRef ?? null,
         snapshot: structuredClone(proposal.snapshot),
         approvals: Object.fromEntries(proposal.approvals), authorizations: Object.fromEntries(proposal.authorizations),
       })),
@@ -385,7 +584,7 @@ export class AccordState {
     const data = await this.persistence!.load();
     for (const doc of data.rooms) {
       const { _id, ...rest } = doc;
-      this.rooms.set(String(_id), { ...(rest as Omit<Room, "id">), id: String(_id) });
+      this.rooms.set(String(_id), { ...(rest as Omit<Room, "id">), id: String(_id), searching: false });
     }
     for (const doc of data.members) {
       const { _id, sealedConstraints, ...rest } = doc;
@@ -393,7 +592,7 @@ export class AccordState {
         constraints: sealedConstraints ? sealer.open<Constraints>(sealedConstraints as SealedValue) : null });
     }
     for (const doc of data.proposals) {
-      this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state,
+      this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state, ...(doc.providerRef ? { providerRef: doc.providerRef } : {}),
         snapshot: doc.snapshot, approvals: new Map(Object.entries(doc.approvals ?? {})), authorizations: new Map(Object.entries(doc.authorizations ?? {})) });
     }
     for (const doc of data.sessions) this.sessions.set(String(doc._id), { roomId: doc.roomId, memberId: doc.memberId, createdAt: new Date(doc.createdAt).toISOString() });
