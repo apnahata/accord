@@ -4,6 +4,6 @@ export type {
   PrivateProposalDTO, ConsentResponseDTO, CapsuleDTO, Capabilities,
   MemoryDTO, EventDTO, PublicChange, ProposalEnvelope,
   PrivateProposalEnvelope, OffersDTO, ReceiptDTO, MerchantDTO, AnalyticsDTO,
-  AutopilotDTO, InboxDTO, InboxMessageDTO,
+  AccountDTO, PulseDTO, AutopilotDTO, InboxDTO, InboxMessageDTO,
   Availability, TripPlan, TripStyle, PlanningDTO, TripOptionDTO,
 } from "@accord/domain";

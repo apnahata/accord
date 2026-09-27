@@ -60,13 +60,16 @@ test("four private sessions recover from stale Miami consent and book Tampa once
     assert.equal(consent.response.status, 200);
   }
   const ready = await call(`/proposals/${oldId}/public`, "GET", undefined, alex);
-  assert.equal(ready.data.proposal.authorization.authorizedCount, 4);
-  const mutation = await call("/merchant/events", "POST", { offerId: "miami-ocean-walk", expectedOfferVersion: "v1", mutation: { type: "INCREASE_PRICE", newTotalCents: 144000 } }, alex);
+  assert.equal(ready.data.proposal.authorization.status, "AUTHORIZED");
+  assert.equal(ready.data.proposal.authorization.transactionCount, 1);
+  assert.equal((await call(`/rooms/${roomId}/demo/merchant`, "GET", undefined, alex)).response.status, 200);
+  assert.equal((await call(`/rooms/${roomId}/demo/merchant`, "GET", undefined, others.Priya)).response.status, 403);
+  const mutation = await call(`/rooms/${roomId}/merchant/events`, "POST", { offerId: "miami-ocean-walk", expectedOfferVersion: "v1", mutation: { type: "INCREASE_PRICE", newTotalCents: 144000 } }, alex);
   assert.equal(mutation.response.status, 200);
   assert.equal(mutation.data.offerVersion, "v2");
   const stale = await call(`/proposals/${oldId}/public`, "GET", undefined, alex);
   assert.equal(stale.data.proposal.state, "STALE");
-  assert.equal(stale.data.proposal.authorization.authorizedCount, 0);
+  assert.equal(stale.data.proposal.authorization.status, "RELEASED");
   const blocked = await call(`/proposals/${oldId}/execute`, "POST", { proposalHash: oldHash }, alex, `booking-${oldHash}`);
   assert.equal(blocked.response.status, 409);
   const alexPrivate = await call(`/proposals/${oldId}/me`, "GET", undefined, alex);
@@ -96,6 +99,10 @@ test("four private sessions recover from stale Miami consent and book Tampa once
   assert.equal(retry.data.bookingReference, booked.data.bookingReference);
   const receipt = await call(`/rooms/${roomId}/receipt`, "GET", undefined, others.Jordan);
   assert.equal(receipt.data.bookingReference, booked.data.bookingReference);
+  assert.equal(receipt.data.payment.transactionIds, undefined, "shared receipts never expose individual payment references");
+  const account = await call("/me", "GET", undefined, others.Jordan);
+  assert.equal(account.data.groups.find((group: any) => group.roomId === roomId).booking.reference, booked.data.bookingReference);
+  assert.equal(account.data.payments.find((payment: any) => payment.proposalId === newId).amountCents, 28000);
 });
 
 test("host sees members and can remove only members who have not confirmed", async t => {
@@ -128,6 +135,27 @@ test("host sees members and can remove only members who have not confirmed", asy
   assert.deepEqual(removed.data.members.map((m: any) => m.displayName), ["Host", "Ready"]);
   assert.equal(removed.data.memberCount, 2);
   assert.equal((await call(`/rooms/${roomId}`, "GET", undefined, idle)).response.status, 401);
+});
+
+test("one frictionless device account can create multiple groups and revisit both", async t => {
+  const app = createApi();
+  app.server.listen(0, "127.0.0.1");
+  await once(app.server, "listening");
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
+  t.after(async () => { app.state.streams.close(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); });
+  const create = async (name: string, cookie?: string) => fetch(`${base}/rooms`, { method: "POST", headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) }, body: JSON.stringify({ name, goal: "Stay", displayName: "Alex" }) });
+  const first = await create("First");
+  const firstRoom = (await first.json() as any).roomId;
+  const firstCookie = first.headers.get("set-cookie")!.split(";")[0]!;
+  const second = await create("Second", firstCookie);
+  const secondRoom = (await second.json() as any).roomId;
+  const currentCookie = second.headers.get("set-cookie")!.split(";")[0]!;
+  const accountResponse = await fetch(`${base}/me`, { headers: { cookie: currentCookie } });
+  const account = await accountResponse.json() as any;
+  assert.equal(accountResponse.status, 200);
+  assert.deepEqual(new Set(account.groups.map((group: any) => group.roomId)), new Set([firstRoom, secondRoom]));
+  assert.equal((await fetch(`${base}/rooms/${firstRoom}`, { headers: { cookie: currentCookie } })).status, 200);
+  assert.equal((await fetch(`${base}/rooms/${secondRoom}`, { headers: { cookie: currentCookie } })).status, 200);
 });
 
 test("merchant mutations reject concurrent reuse of one expected offer version", async () => {

@@ -18,11 +18,6 @@ type IntakeReply = {
   notChecked?: string[];
 };
 
-function localDateInput(value: string) {
-  const date = new Date(value);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-
 export function Intake() {
   const { roomId = '' } = useParams();
   const path = '/rooms/' + segment(roomId);
@@ -65,10 +60,11 @@ export function Intake() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const maximum = Number(data.get('maximum'));
-    const deadline = String(data.get('deadline') || '');
     setDraft({
       maxContributionCents: Math.round(maximum * 100),
-      latestCheckOutAt: deadline ? new Date(deadline).toISOString() : undefined,
+      earliestCheckInDate: String(data.get('earliestCheckInDate') || '') || undefined,
+      latestCheckInDate: String(data.get('latestCheckInDate') || '') || undefined,
+      latestCheckOutDate: String(data.get('latestCheckOutDate') || '') || undefined,
       requiresFullCashRefund: data.get('refund') === 'on',
       requiresStepFreeAccess: data.get('stepFree') === 'on',
       softPreference: String(data.get('preference') || ''),
@@ -141,9 +137,13 @@ export function Intake() {
           <label htmlFor="maximum">Maximum personal contribution <span>Required</span></label>
           <div className="money-input"><span>$</span><input id="maximum" name="maximum" type="number" inputMode="decimal" min="0" max="1000000" step="0.01" required placeholder="350" defaultValue={values ? values.maxContributionCents / 100 : ''} /></div>
           <p className="field-help">Your ceiling stays private. The group sees the equal share.</p>
-          <label htmlFor="deadline">Latest checkout / departure <span>Optional</span></label>
-          <input id="deadline" name="deadline" type="datetime-local" defaultValue={values?.latestCheckOutAt ? localDateInput(values.latestCheckOutAt) : ''} />
-          <p className="field-help">Enter in your device’s timezone: {Intl.DateTimeFormat().resolvedOptions().timeZone}.</p>
+          <label htmlFor="earliest-check-in-date">Earliest acceptable arrival date <span>Optional</span></label>
+          <input id="earliest-check-in-date" name="earliestCheckInDate" type="date" defaultValue={values?.earliestCheckInDate || ''} />
+          <label htmlFor="latest-check-in-date">Latest acceptable arrival date <span>Optional</span></label>
+          <input id="latest-check-in-date" name="latestCheckInDate" type="date" defaultValue={values?.latestCheckInDate || ''} />
+          <label htmlFor="latest-check-out-date">Latest acceptable departure date <span>Optional</span></label>
+          <input id="latest-check-out-date" name="latestCheckOutDate" type="date" defaultValue={values?.latestCheckOutDate || ''} />
+          <p className="field-help">Leave these blank if the group’s trip dates work for you. Accord will not infer arrival or checkout times.</p>
           <label className="checkbox-row"><input name="refund" type="checkbox" defaultChecked={values?.requiresFullCashRefund} /><span><strong>I need a full cash refund</strong><small>Travel credit does not meet this requirement.</small></span></label>
           <label className="checkbox-row"><input name="stepFree" type="checkbox" defaultChecked={values?.requiresStepFreeAccess} /><span><strong>I need verified step-free access</strong><small>Unknown evidence does not count.</small></span></label>
           <hr />

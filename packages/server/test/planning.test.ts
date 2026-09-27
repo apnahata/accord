@@ -154,7 +154,7 @@ test("when two members could each unblock the dates, one yes retires the other's
 
 function plannedState(suggest?: (input: DestinationsInput) => Promise<DestinationIdea[] | undefined>) {
   const state = new AccordState(undefined, suggest ? { suggestDestinations: suggest } : {}, { enabled: false, watchIntervalMs: 0 });
-  const created = state.createRoom("Trip", "Plan it", "Alex", undefined, { plan: { countryCode: "US" }, rehearsal: true });
+  const created = state.createRoom("Trip", "Plan it", "Alex", undefined, undefined, { plan: { countryCode: "US" }, rehearsal: true });
   const room = state.rooms.get(created.roomId)!;
   state.join(created.inviteToken, "Priya");
   const [alex, priya] = room.memberIds.map(id => state.members.get(id)!);

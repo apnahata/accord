@@ -4,14 +4,14 @@ import { MongoMerchantStore } from "../../integrations/src/mongo-merchant.js";
 
 /** Encrypted at rest: only the owning member's API responses ever decrypt it. */
 export type SealedValue = { kid: string; iv: string; tag: string; data: string };
-export type SessionRecord = { roomId: string; memberId: string; createdAt: string };
-export type RoomAggregate = { room: Document; members: Document[]; proposals: Document[] };
+export type SessionRecord = { userId: string; roomId?: string; memberId?: string; createdAt: string };
+export type RoomAggregate = { room: Document; users: Document[]; members: Document[]; proposals: Document[] };
 export type Removals = { members: string[]; sessions: string[] };
-export type Snapshot = { rooms: Document[]; members: Document[]; proposals: Document[]; sessions: Document[]; invitations: Document[] };
+export type Snapshot = { rooms: Document[]; users: Document[]; members: Document[]; proposals: Document[]; sessions: Document[]; invitations: Document[] };
 
-const coordinatorCollections = ["rooms", "members", "proposals", "sessions", "invitations"] as const;
+const coordinatorCollections = ["rooms", "users", "members", "proposals", "sessions", "invitations"] as const;
 const merchantCollections = ["merchant_offers", "merchant_bookings", "merchant_outbox"] as const;
-export const SESSION_TTL_SECONDS = 86_400;
+export const SESSION_TTL_SECONDS = 30 * 86_400;
 
 export class Sealer {
   readonly #key: Buffer;
@@ -56,8 +56,18 @@ export class MongoPersistence {
 
   async #ensureIndexes() {
     await this.#collection("members").createIndex({ roomId: 1 });
+    await this.#collection("members").createIndex({ userId: 1, roomId: 1 });
+    await this.#collection("users").createIndex({ email: 1 }, { unique: true, sparse: true });
     await this.#collection("proposals").createIndex({ roomId: 1 });
-    await this.#collection("sessions").createIndex({ createdAt: 1 }, { expireAfterSeconds: SESSION_TTL_SECONDS });
+    await this.#collection("sessions").createIndex({ userId: 1 });
+    try { await this.#collection("sessions").createIndex({ createdAt: 1 }, { expireAfterSeconds: SESSION_TTL_SECONDS }); }
+    catch (error) {
+      const mongo = error as { code?: number; codeName?: string };
+      if (mongo.code !== 85 && mongo.codeName !== "IndexOptionsConflict") throw error;
+      // Existing deployments used a one-day TTL. Change it in place so
+      // upgrading to durable 30-day device accounts does not block startup.
+      await this.#db.command({ collMod: "sessions", index: { keyPattern: { createdAt: 1 }, expireAfterSeconds: SESSION_TTL_SECONDS } });
+    }
   }
 
   async ping() {
@@ -66,23 +76,24 @@ export class MongoPersistence {
   }
 
   async load(): Promise<Snapshot> {
-    const [rooms, members, proposals, sessions, invitations] = await Promise.all(
+    const [rooms, users, members, proposals, sessions, invitations] = await Promise.all(
       coordinatorCollections.map(name => this.#collection(name).find().toArray()));
-    return { rooms: rooms!, members: members!, proposals: proposals!, sessions: sessions!, invitations: invitations! };
+    return { rooms: rooms!, users: users!, members: members!, proposals: proposals!, sessions: sessions!, invitations: invitations! };
   }
 
   /** Writes are serialized so a later snapshot can never be overwritten by an earlier one. */
-  save(aggregates: RoomAggregate[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>, removed: Removals = { members: [], sessions: [] }) {
-    const run = this.#tail.then(() => this.#write(aggregates, sessions, invitations, removed));
+  save(aggregates: RoomAggregate[], users: Document[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>, removed: Removals = { members: [], sessions: [] }) {
+    const run = this.#tail.then(() => this.#write(aggregates, users, sessions, invitations, removed));
     this.#tail = run.catch(() => undefined);
     return run;
   }
 
-  async #write(aggregates: RoomAggregate[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>, removed: Removals) {
+  async #write(aggregates: RoomAggregate[], users: Document[], sessions: Array<{ id: string; value: SessionRecord }>, invitations: Array<{ id: string; roomId: string }>, removed: Removals) {
     const upserts = (docs: Document[]): AnyBulkWriteOperation<Document>[] =>
       docs.map(doc => ({ replaceOne: { filter: { _id: doc._id }, replacement: doc, upsert: true } }));
     const writes: Array<[string, AnyBulkWriteOperation<Document>[]]> = [
       ["rooms", upserts(aggregates.map(item => item.room))],
+      ["users", upserts([...new Map([...aggregates.flatMap(item => item.users), ...users].map(doc => [String(doc._id), doc])).values()])],
       ["members", upserts(aggregates.flatMap(item => item.members))],
       ["proposals", upserts(aggregates.flatMap(item => item.proposals))],
       ["sessions", upserts(sessions.map(item => ({ _id: item.id, ...item.value, createdAt: new Date(item.value.createdAt) })))],

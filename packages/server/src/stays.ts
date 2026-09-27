@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { OfferSchema, type Offer, type Trip } from "@accord/domain";
+import type { PriceObservation } from "./pulse.js";
 
 /** Live stay providers. Everything here maps provider data into the domain Offer; feasibility stays in @accord/domain. */
 export type Fetch = typeof fetch;
+/** Receives every public price a provider returned (all rates, not only the ones Accord keeps). */
+export type Observe = (rows: PriceObservation[]) => void;
+const liteOfferId = (hotelId: string, roomName: string, tag: string, checkIn: string, checkOut: string) => `lite-${hotelId}-${createHash("sha256").update(`${checkIn}|${checkOut}|${roomName}|${tag}`).digest("hex").slice(0, 12)}`;
 export type StayResearch = { sourceLabel: string; pros: string[]; cons: string[]; nearby: string[]; summary?: string };
 export type LiveStay = { offer: Offer; research: StayResearch; ref: LiteRef | ExternalRef };
 export type LiteRef = { provider: "LITEAPI"; hotelId: string; offerId: string; roomName: string; refundableTag: string };
@@ -64,7 +68,7 @@ function liteRateSummary(roomType: LiteRoomType) {
 }
 
 export class LiteApi {
-  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch) {
+  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch, private readonly observe?: Observe) {
     // This checkout has simulated member payments and a sandbox-only booking
     // flow. ACC_CREDIT_CARD would charge the account card with a production key.
     if (!/^(?:sand|sandbox)_/.test(key)) throw new Error("LITEAPI_SANDBOX_KEY_REQUIRED");
@@ -87,6 +91,7 @@ export class LiteApi {
     const rates = await this.rates(trip, {});
     const hotelsById = new Map((rates.hotels ?? []).map(hotel => [hotel.id, hotel]));
     const candidates = (rates.data ?? []).slice(0, 15);
+    this.#record(trip, rates, "search");
     const details = await pool(candidates, 4, hotel => this.hotel(hotel.hotelId).catch(() => undefined));
     const stays: LiveStay[] = [];
     candidates.forEach((hotel, index) => {
@@ -104,8 +109,22 @@ export class LiteApi {
   /** Current price and terms for the exact room/rate the group approved. */
   async requote(trip: Trip, ref: LiteRef) {
     const rates = await this.rates(trip, { hotelIds: [ref.hotelId] });
+    this.#record(trip, rates, "recheck");
     const summaries = (rates.data?.[0]?.roomTypes ?? []).map(liteRateSummary).filter(Boolean) as Array<NonNullable<ReturnType<typeof liteRateSummary>>>;
     return summaries.filter(item => item.roomName === ref.roomName && item.refundableTag === ref.refundableTag).sort((a, b) => a.totalCents - b.totalCents)[0];
+  }
+
+  #record(trip: Trip, rates: Awaited<ReturnType<LiteApi["rates"]>>, source: PriceObservation["source"]) {
+    if (!this.observe) return;
+    const names = new Map((rates.hotels ?? []).map(hotel => [hotel.id, hotel.name]));
+    const rows: PriceObservation[] = [];
+    for (const hotel of rates.data ?? []) for (const roomType of hotel.roomTypes ?? []) {
+      const rate = liteRateSummary(roomType);
+      if (!rate || rate.maxOccupancy < trip.guests) continue;
+      rows.push({ offerId: liteOfferId(hotel.hotelId, rate.roomName, rate.refundableTag, trip.checkIn, trip.checkOut), provider: "LITEAPI", propertyName: names.get(hotel.hotelId) ?? hotel.hotelId,
+        trip, totalCents: rate.totalCents, refundable: rate.refundableTag === "RFN", source });
+    }
+    try { this.observe(rows); } catch { /* telemetry is best-effort */ }
   }
 
   async prebook(offerId: string) {
@@ -136,16 +155,21 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
   // A refund window that has already closed is, for the group, non-refundable.
   const deadline = cancelBy && cancelBy.getTime() > now.getTime() ? cancelBy : undefined;
   const refundable = !!deadline;
-  const checkOut = String(detail?.checkinCheckoutTimes?.checkout || "12:00 PM");
-  const checkIn = String(detail?.checkinCheckoutTimes?.checkin_start || "3:00 PM");
+  const rawCheckOut = typeof detail?.checkinCheckoutTimes?.checkout === "string" ? detail.checkinCheckoutTimes.checkout.trim() : "";
+  const rawCheckIn = typeof detail?.checkinCheckoutTimes?.checkin_start === "string" ? detail.checkinCheckoutTimes.checkin_start.trim() : "";
+  let checkInAt: string, checkOutAt: string, checkInTimeKnown = false, checkOutTimeKnown = false;
+  try { checkInAt = localToInstant(trip.checkIn, rawCheckIn, trip.timeZone); checkInTimeKnown = true; }
+  catch { checkInAt = localToInstant(trip.checkIn, "12:00 PM", trip.timeZone); }
+  try { checkOutAt = localToInstant(trip.checkOut, rawCheckOut, trip.timeZone); checkOutTimeKnown = true; }
+  catch { checkOutAt = localToInstant(trip.checkOut, "12:00 PM", trip.timeZone); }
   const name = String(detail?.name ?? listing?.name ?? hotelId);
   const roomType = rate.board && !/room only/i.test(rate.board) ? `${rate.roomName} · ${rate.board}` : rate.roomName;
   try {
     const offer = OfferSchema.parse({
-      offerId: `lite-${hotelId}-${shortHash(`${trip.checkIn}|${trip.checkOut}|${rate.roomName}|${rate.refundableTag}`)}`, offerVersion: "v1",
-      merchantId: "liteapi", merchantName: "LiteAPI hotel inventory (sandbox)", propertyId: hotelId, propertyName: name,
+      offerId: liteOfferId(hotelId, rate.roomName, rate.refundableTag, trip.checkIn, trip.checkOut), offerVersion: "v1",
+      merchantId: "liteapi", merchantName: "Nuitée Connect hotel inventory (sandbox)", propertyId: hotelId, propertyName: name,
       city: String(detail?.city ?? trip.destination), roomType,
-      checkInAt: localToInstant(trip.checkIn, checkIn, trip.timeZone), checkOutAt: localToInstant(trip.checkOut, checkOut, trip.timeZone),
+      checkInDate: trip.checkIn, checkOutDate: trip.checkOut, checkInAt, checkOutAt, checkInTimeKnown, checkOutTimeKnown,
       guestCapacity: rate.maxOccupancy, stepFreeVerified: stepFree,
       cancellationPolicyCode: refundable ? "FULL_CASH_REFUND" : "NON_REFUNDABLE",
       ...(deadline && !Number.isNaN(deadline.getTime()) ? { fullRefundDeadline: deadline.toISOString() } : {}),
@@ -159,7 +183,7 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
       rating: typeof detail?.rating === "number" ? detail.rating : undefined, reviewCount: typeof detail?.reviewCount === "number" ? detail.reviewCount : undefined,
     });
     return { offer, ref: { provider: "LITEAPI", hotelId, offerId: rate.offerId, roomName: rate.roomName, refundableTag: rate.refundableTag },
-      research: { sourceLabel: "LiteAPI hotel data and review analysis",
+      research: { sourceLabel: "Nuitée Connect hotel data and review analysis",
         pros: (sentiment.pros ?? []).slice(0, 3), cons: (sentiment.cons ?? []).slice(0, 3),
         nearby: [...poi].sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 3).map(item => `${item.name} · ${item.distanceKm} km`) } };
   } catch { return undefined; }
@@ -170,13 +194,16 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
 export class GoogleHotels {
-  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch) {}
+  constructor(private readonly key: string, private readonly fetcher: Fetch = fetch, private readonly observe?: Observe) {}
 
   async search(trip: Trip, now = new Date()): Promise<LiveStay[]> {
     const params = new URLSearchParams({ engine: "google_hotels", q: `${trip.destination} vacation rentals`, vacation_rentals: "true",
       check_in_date: trip.checkIn, check_out_date: trip.checkOut, adults: String(trip.guests), currency: "USD", gl: trip.countryCode.toLowerCase(), hl: "en", api_key: this.key });
     const body = await getJson(this.fetcher, `https://serpapi.com/search.json?${params}`, {}, 30_000);
-    return (body.properties ?? []).slice(0, 20).map((property: any) => mapGoogle(trip, property, now)).filter(Boolean) as LiveStay[];
+    const stays = (body.properties ?? []).slice(0, 20).map((property: any) => mapGoogle(trip, property, now)).filter(Boolean) as LiveStay[];
+    try { this.observe?.(stays.map(stay => ({ offerId: stay.offer.offerId, provider: "GOOGLE_HOTELS", propertyName: stay.offer.propertyName, trip,
+      totalCents: stay.offer.totalCents, refundable: stay.offer.cancellationPolicyCode === "FULL_CASH_REFUND", source: "search" }))); } catch { /* best-effort */ }
+    return stays;
   }
 }
 
@@ -213,14 +240,20 @@ function mapGoogle(trip: Trip, property: any, now: Date): LiveStay | undefined {
   const walkMinutes = (place: typeof nearby[number]) => Number(/(\d+)\s*min/.exec(place.transportations?.find(item => item.type === "Walking")?.duration ?? "")?.[1] ?? Infinity);
   const walkable = nearby.filter(place => walkMinutes(place) <= 15);
   const essential = (property.essential_info ?? []) as string[];
+  const rawCheckIn = typeof property.check_in_time === "string" ? property.check_in_time.trim() : "";
+  const rawCheckOut = typeof property.check_out_time === "string" ? property.check_out_time.trim() : "";
+  let checkInAt: string, checkOutAt: string, checkInTimeKnown = false, checkOutTimeKnown = false;
+  try { checkInAt = localToInstant(trip.checkIn, rawCheckIn, trip.timeZone); checkInTimeKnown = true; }
+  catch { checkInAt = localToInstant(trip.checkIn, "12:00 PM", trip.timeZone); }
+  try { checkOutAt = localToInstant(trip.checkOut, rawCheckOut, trip.timeZone); checkOutTimeKnown = true; }
+  catch { checkOutAt = localToInstant(trip.checkOut, "12:00 PM", trip.timeZone); }
   try {
     const offer = OfferSchema.parse({
       offerId: `gh-${shortHash(`${property.property_token}|${trip.checkIn}|${trip.checkOut}`)}`, offerVersion: "v1",
       merchantId: "google-hotels", merchantName: price?.source ? String(price.source) : "Google Hotels listing",
       propertyId: shortHash(property.property_token), propertyName: String(property.name).slice(0, 160), city: trip.destination,
       roomType: essential.filter(item => !/^Sleeps/i.test(item)).slice(0, 3).join(" · ") || "Vacation rental",
-      checkInAt: localToInstant(trip.checkIn, String(property.check_in_time || "4:00 PM"), trip.timeZone),
-      checkOutAt: localToInstant(trip.checkOut, String(property.check_out_time || "11:00 AM"), trip.timeZone),
+      checkInDate: trip.checkIn, checkOutDate: trip.checkOut, checkInAt, checkOutAt, checkInTimeKnown, checkOutTimeKnown,
       guestCapacity: sleeps, stepFreeVerified: stepFree,
       cancellationPolicyCode: deadline ? "FULL_CASH_REFUND" : "NON_REFUNDABLE", ...(deadline ? { fullRefundDeadline: deadline } : {}),
       subtotalCents: cents(total), mandatoryFeesCents: 0, totalCents: cents(total), currency: "USD", available: true,

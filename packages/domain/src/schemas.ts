@@ -14,6 +14,11 @@ export type Availability = z.infer<typeof AvailabilitySchema>;
 /** The only authoritative business input schemas. Frontend and providers import these. */
 export const ConstraintsSchema = z.object({
   maxContributionCents: money,
+  earliestCheckInDate: day.optional(),
+  latestCheckInDate: day.optional(),
+  latestCheckOutDate: day.optional(),
+  earliestCheckInAt: instant.optional(),
+  latestCheckInAt: instant.optional(),
   latestCheckOutAt: instant.optional(),
   requiresFullCashRefund: z.boolean(),
   requiresStepFreeAccess: z.boolean(),
@@ -26,7 +31,13 @@ export const ConstraintsSchema = z.object({
   /** How long this member would like the trip to be. A wish, not a limit. */
   nights: z.number().int().min(1).max(14).optional(),
   leavingFrom: z.string().trim().max(120).optional(),
-}).strict();
+}).strict().refine(value => !value.earliestCheckInAt || !value.latestCheckInAt || Date.parse(value.earliestCheckInAt) <= Date.parse(value.latestCheckInAt), {
+  message: "Earliest check-in must not be after latest check-in",
+  path: ["latestCheckInAt"],
+}).refine(value => !value.earliestCheckInDate || !value.latestCheckInDate || value.earliestCheckInDate <= value.latestCheckInDate, {
+  message: "Earliest check-in date must not be after latest check-in date",
+  path: ["latestCheckInDate"],
+});
 export type Constraints = z.infer<typeof ConstraintsSchema>;
 
 /**
@@ -60,8 +71,12 @@ export const OfferSchema = z.object({
   propertyName: z.string().min(1),
   city: z.string().min(1),
   roomType: z.string().min(1),
+  checkInDate: day,
+  checkOutDate: day,
   checkInAt: instant,
   checkOutAt: instant,
+  checkInTimeKnown: z.boolean(),
+  checkOutTimeKnown: z.boolean(),
   guestCapacity: z.number().int().nonnegative(),
   stepFreeVerified: z.boolean().nullable(),
   cancellationPolicyCode: z.enum(["FULL_CASH_REFUND", "TRAVEL_CREDIT", "NON_REFUNDABLE"]),
@@ -113,7 +128,9 @@ export type MerchantEvent = z.infer<typeof MerchantEventSchema>;
 
 export const ExtractionSchema = z.object({
   proposed: z.object({
-    maxContributionCents: money.optional(), latestCheckOutAt: instant.optional(),
+    maxContributionCents: money.optional(),
+    earliestCheckInDate: day.optional(), latestCheckInDate: day.optional(), latestCheckOutDate: day.optional(),
+    earliestCheckInAt: instant.optional(), latestCheckInAt: instant.optional(), latestCheckOutAt: instant.optional(),
     requiresFullCashRefund: z.boolean().optional(), requiresStepFreeAccess: z.boolean().optional(),
     softPreferences: z.array(z.object({ kind: z.enum(["LOWEST_PRICE", "WALKABLE", "NEAR_ACTIVITIES", "QUIET"]), weight: z.number().min(0).max(1) })).optional(),
     availability: z.array(z.object({ from: day, to: day }).strict()).max(6).optional(),

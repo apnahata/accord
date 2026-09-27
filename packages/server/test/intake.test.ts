@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { addDays, localDay } from "@accord/domain";
 import { createApi } from "../src/server.js";
+import { respectExplicitOptionality } from "../src/intake.js";
 
 const modelResponse = (value: unknown) => new Response(JSON.stringify({
   candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify(value) }] } }],
@@ -106,7 +107,7 @@ test("while a trip is still being planned, the intake asks for dates and picks u
   assert.equal(drafted.constraints.leavingFrom, "Boston");
 });
 
-test("questions about unmentioned fields and uncheckable requirements do not block the draft", async t => {
+test("every extractor ambiguity is resolved before review", async t => {
   const app = createApi({
     geminiApiKey: "test-only",
     geminiModel: "test-model",
@@ -128,9 +129,26 @@ test("questions about unmentioned fields and uncheckable requirements do not blo
     body: JSON.stringify({ messages: [{ role: "user", content: "I can pay at most $400, I need a full refund, and no red-eye flights." }] }),
   });
   const data = await response.json() as any;
-  assert.equal(data.stage, "REVIEW");
-  assert.equal(data.constraints.maxContributionCents, 40000);
-  assert.equal(data.constraints.requiresFullCashRefund, true);
-  assert.deepEqual(data.followUps, ["What is the latest checkout time you need?"]);
-  assert.deepEqual(data.notChecked, ["No red-eye flights"]);
+  assert.equal(data.stage, "CLARIFYING");
+  assert.equal(data.reply, "What is the latest checkout time you need?");
+  assert.equal(data.constraints, undefined);
+});
+
+test("an explicit no-date preference clears invented dates and follow-up questions", () => {
+  const cleaned = respectExplicitOptionality({
+    proposed: {
+      maxContributionCents: 50000,
+      earliestCheckInDate: "2027-11-10",
+      latestCheckOutDate: "2027-11-14",
+      latestCheckOutAt: "2027-11-14T18:00:00-05:00",
+      softPreferences: [{ kind: "QUIET", weight: 0.8 }],
+    },
+    privacy: { reasonPrivate: false }, unsupportedHardRequirements: [],
+    ambiguities: [{ field: "latestCheckOutAt", question: "What checkout time do you need?" }],
+  }, "I don't have any date or time preference.");
+  assert.equal(cleaned.proposed.earliestCheckInDate, undefined);
+  assert.equal(cleaned.proposed.latestCheckOutDate, undefined);
+  assert.equal(cleaned.proposed.latestCheckOutAt, undefined);
+  assert.deepEqual(cleaned.ambiguities, []);
+  assert.deepEqual(cleaned.proposed.softPreferences, [{ kind: "QUIET", weight: 0.8 }], "a date answer must not erase unrelated preferences");
 });
