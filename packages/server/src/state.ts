@@ -508,7 +508,9 @@ export class AccordState {
     return this.store.transaction(async tx => { const offer = (await tx.getOffer(id))?.offer; return offer ? compatibleOffer(offer) : undefined; });
   }
   /** Rooms with trip details or a plan use their own search results; legacy rooms use the controlled demo catalog. */
-  offerIdsFor(room: Room) { return room.trip || room.plan ? room.search?.offerIds ?? [] : this.catalogIds; }
+  // A planning room searches every destination candidate before anyone decides or votes; let members browse
+  // all of it (not just the winner) rather than waiting for room.search, which is only set once a trip is decided.
+  offerIdsFor(room: Room) { return room.trip || room.plan ? room.search?.offerIds ?? room.planning?.options.flatMap(option => option.offerIds) ?? [] : this.catalogIds; }
   /**
    * Searches several candidate trips at once for planning and replaces the room's results with all of them.
    * Rehearsal rooms get generated stays; live rooms query each configured provider per candidate.

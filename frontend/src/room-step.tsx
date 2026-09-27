@@ -74,6 +74,7 @@ function VoteCard({ room, base, planning, onChange }: { room: Room; base: string
     <p className="step-from"><Sparkles size={14} />Accord</p>
     <h2>{mine ? `You picked ${mine.destination}.` : 'Pick one.'}</h2>
     <p>{planning.votesCast} of {room.memberCount} have picked.</p>
+    <LinkButton to={`/rooms/${segment(room.id)}/offers`} secondary>See every stay Accord found</LinkButton>
     <div className="step-options">{planning.options.map(option => {
       const chosen = planning.myVoteOptionId === option.id;
       return <article key={option.id} className={`trip-option ${chosen ? 'mine' : ''}`}>
