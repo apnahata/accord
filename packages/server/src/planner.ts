@@ -116,7 +116,7 @@ export class Planner {
       : `${sharedCount} possible ${nights}-night stretches work for everyone. Accord will price ${list(windows.map(dayRange))}.`}${nights < wanted ? ` Most people wanted ${wanted} nights, but no ${wanted}-night stretch fits everyone’s dates.` : ""}`, undefined,
       { ...ACCORD, detail: "Worked out from everyone’s private availability and the trip length most people asked for. No one’s answers are shown to the group." });
 
-    const { ideas, source } = await this.#destinations(room, members, windows);
+    const { ideas, source, fallback } = await this.#destinations(room, members, windows);
     planning.destinations = ideas;
     if (!ideas.length) { await this.#noDestinations(room, planning, members, windows); return; }
     this.state.emit(room, "PLAN_DESTINATIONS", `Accord is considering ${list(ideas.map(idea => idea.name))}.`, undefined,
@@ -124,31 +124,21 @@ export class Planner {
         ? "Suggested by Gemini from anonymous totals of the trip styles people picked. Budgets and names were not shared."
         : "Picked from Accord’s destination list by the trip styles people chose, skipping anywhere someone ruled out." });
 
-    const candidates = ideas.flatMap(idea => windows.map(window => ({ idea, window }))).slice(0, MAX_SEARCHES);
-    const trips = candidates.map(({ idea, window }) => TripSchema.parse({ destination: idea.name, countryCode: room.plan!.countryCode,
-      checkIn: window.checkIn, checkOut: window.checkOut, guests: members.length, timeZone: idea.timeZone }));
-    const found = await this.state.searchCandidates(room, trips);
-    if (room.planning !== planning) return;
-    planning.offerZones = Object.fromEntries(candidates.flatMap(({ idea }, index) => found[index]!.map(id => [id, idea.timeZone])));
-
-    const options: PlanOption[] = [];
-    for (const idea of ideas) {
-      const indexes = candidates.flatMap((candidate, index) => candidate.idea === idea ? [index] : []);
-      const offers = await this.state.allOffers(indexes.flatMap(index => found[index]!));
-      const best = (await this.state.rankFeasible(offers, members))[0];
-      if (!best) continue;
-      const index = indexes.find(i => found[i]!.includes(best.offerId))!;
-      const window = candidates[index]!.window;
-      options.push({ id: `${idea.name}|${window.checkIn}`, destination: idea.name, timeZone: idea.timeZone, checkIn: window.checkIn, checkOut: window.checkOut,
-        offerIds: found[index]!, offerId: best.offerId, propertyName: best.propertyName, totalCents: best.totalCents,
-        ...(best.imageUrl ? { imageUrl: best.imageUrl } : {}), ...this.#why(idea, window, members, best.cancellationPolicyCode) });
+    let searched = await this.#search(room, planning, members, windows, ideas);
+    if (!searched) return;
+    if (!searched.options.length && fallback.length) {
+      planning.destinations = [...ideas, ...fallback];
+      this.state.emit(room, "PLAN_DESTINATIONS", `None of the places the group asked for works for everyone, so Accord is also considering ${list(fallback.map(idea => idea.name))}.`, undefined,
+        { ...ACCORD, detail: "A requested place can't block the whole trip. No one's budget or requirements are shown to the group." });
+      const more = await this.#search(room, planning, members, windows, fallback);
+      if (!more) return;
+      searched = { options: more.options, checked: searched.checked + more.checked, trips: searched.trips + more.trips };
     }
-    options.sort((a, b) => b.fit - a.fit || a.totalCents - b.totalCents);
+    const { options, checked, trips } = searched;
     planning.options = options;
-    const checked = new Set(found.flat()).size;
     this.state.emit(room, "PLAN_SEARCHED", options.length
-      ? `Checked ${checked} stays across ${trips.length} trips. ${options.length === 1 ? "One destination has" : `${options.length} destinations have`} a stay that works for everyone.`
-      : `Checked ${checked} stays across ${trips.length} trips. None works for everyone yet.`, undefined, ACCORD);
+      ? `Checked ${checked} stays across ${trips} trips. ${options.length === 1 ? "One destination has" : `${options.length} destinations have`} a stay that works for everyone.`
+      : `Checked ${checked} stays across ${trips} trips. None works for everyone yet.`, undefined, ACCORD);
 
     if (!options.length) {
       const nudged = await this.hooks.nudge(room);
@@ -166,6 +156,31 @@ export class Planner {
     for (const member of members) this.state.notify(room, member.id, { kind: "VOTE", title: "Vote on where you’re going",
       body: `Accord found ${options.length} trips that work for everyone: ${list(options.map(option => `${option.destination} (${dayRange(option)})`))}. Your vote is private.` });
     this.state.touch(room);
+  }
+
+  /** Searches each destination idea across the date windows and returns the ones with a stay that works for everyone. */
+  async #search(room: Room, planning: Planning, members: Ready, windows: DateWindow[], ideas: DestinationIdea[]) {
+    const candidates = ideas.flatMap(idea => windows.map(window => ({ idea, window }))).slice(0, MAX_SEARCHES);
+    const trips = candidates.map(({ idea, window }) => TripSchema.parse({ destination: idea.name, countryCode: room.plan!.countryCode,
+      checkIn: window.checkIn, checkOut: window.checkOut, guests: members.length, timeZone: idea.timeZone }));
+    const found = await this.state.searchCandidates(room, trips);
+    if (room.planning !== planning) return undefined;
+    planning.offerZones = { ...planning.offerZones, ...Object.fromEntries(candidates.flatMap(({ idea }, index) => found[index]!.map(id => [id, idea.timeZone]))) };
+
+    const options: PlanOption[] = [];
+    for (const idea of ideas) {
+      const indexes = candidates.flatMap((candidate, index) => candidate.idea === idea ? [index] : []);
+      const offers = await this.state.allOffers(indexes.flatMap(index => found[index]!));
+      const best = (await this.state.rankFeasible(offers, members))[0];
+      if (!best) continue;
+      const index = indexes.find(i => found[i]!.includes(best.offerId))!;
+      const window = candidates[index]!.window;
+      options.push({ id: `${idea.name}|${window.checkIn}`, destination: idea.name, timeZone: idea.timeZone, checkIn: window.checkIn, checkOut: window.checkOut,
+        offerIds: found[index]!, offerId: best.offerId, propertyName: best.propertyName, totalCents: best.totalCents,
+        ...(best.imageUrl ? { imageUrl: best.imageUrl } : {}), ...this.#why(idea, window, members, best.cancellationPolicyCode) });
+    }
+    options.sort((a, b) => b.fit - a.fit || a.totalCents - b.totalCents);
+    return { options, checked: new Set(found.flat()).size, trips: trips.length };
   }
 
   vote(room: Room, memberId: string, optionId: string) {
@@ -339,11 +354,13 @@ export class Planner {
     const named = [...new Map(ideas.filter(idea => looksLikeAPlace(idea) && !ruledOut(idea)).map(idea => [idea.toLowerCase(), idea])).values()];
     // When people named places, the ballot is exactly those places: every one is represented, and nothing
     // nobody asked for is added. The group then settles it by private vote. With no named places, Accord picks.
+    // Accord's other picks are kept as a fallback, searched only if no requested place works for everyone,
+    // so one unaffordable request can't leave the whole group without a trip.
     const honor = <T extends { name: string }>(candidates: T[], make: (idea: string) => T) => {
-      if (!named.length) return candidates.slice(0, MAX_DESTINATIONS);
+      if (!named.length) return { ideas: candidates.slice(0, MAX_DESTINATIONS), fallback: [] as T[] };
       const asked = candidates.filter(item => named.some(idea => alreadyCovers(idea, item.name)));
       const missed = named.filter(idea => !asked.some(item => alreadyCovers(idea, item.name)));
-      return [...asked, ...missed.map(make)];
+      return { ideas: [...asked, ...missed.map(make)], fallback: candidates.filter(item => !asked.includes(item)).slice(0, MAX_DESTINATIONS) };
     };
     const suggest = this.state.providers.suggestDestinations;
     if (suggest) {
@@ -354,15 +371,15 @@ export class Planner {
         .filter((idea, index, all) => idea.name.length >= 2 && !ruledOut(idea.name) && all.findIndex(other => other.name.toLowerCase() === idea.name.toLowerCase()) === index);
       // The model can drop or substitute a place someone asked for; its judgment never overrides an explicit request.
       const chosen = honor(suggested, idea => ({ name: idea, timeZone: "America/New_York", why: "Someone in the group asked to go here.", styles: [] as TripStyle[] }));
-      if (chosen.length) return { ideas: chosen, source: "AI" as const };
+      if (chosen.ideas.length) return { ...chosen, source: "AI" as const };
     }
     const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
-    const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, Math.max(MAX_DESTINATIONS, named.length)).map(item => {
+    const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, MAX_DESTINATIONS + named.length).map(item => {
       const matched = item.styles.filter(style => styleCounts[style]);
       return { name: item.name, timeZone: item.timeZone, styles: item.styles,
         why: matched.length ? `Known for ${list(matched.map(style => styleLabel[style]))}.` : ideas.some(text => mentions(text, item.name)) ? "Someone suggested it." : "A popular group trip." };
     });
-    return { source: "ACCORD" as const, ideas: honor(ranked, idea => ({ name: idea, timeZone: "America/New_York", styles: [] as TripStyle[], why: "Someone in the group asked to go here." })) };
+    return { source: "ACCORD" as const, ...honor(ranked, idea => ({ name: idea, timeZone: "America/New_York", styles: [] as TripStyle[], why: "Someone in the group asked to go here." })) };
   }
 
   /** Public-safe reasons: anonymous totals and facts about the stay, never an individual's answer. */
