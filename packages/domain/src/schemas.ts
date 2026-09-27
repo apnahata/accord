@@ -2,18 +2,29 @@ import { z } from "zod";
 
 const money = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const instant = z.iso.datetime({ offset: true });
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 /** The only authoritative business input schemas. Frontend and providers import these. */
 export const ConstraintsSchema = z.object({
   maxContributionCents: money,
+  earliestCheckInDate: day.optional(),
+  latestCheckInDate: day.optional(),
+  latestCheckOutDate: day.optional(),
+  earliestCheckInAt: instant.optional(),
+  latestCheckInAt: instant.optional(),
   latestCheckOutAt: instant.optional(),
   requiresFullCashRefund: z.boolean(),
   requiresStepFreeAccess: z.boolean(),
   softPreference: z.string().max(1000),
-}).strict();
+}).strict().refine(value => !value.earliestCheckInAt || !value.latestCheckInAt || Date.parse(value.earliestCheckInAt) <= Date.parse(value.latestCheckInAt), {
+  message: "Earliest check-in must not be after latest check-in",
+  path: ["latestCheckInAt"],
+}).refine(value => !value.earliestCheckInDate || !value.latestCheckInDate || value.earliestCheckInDate <= value.latestCheckInDate, {
+  message: "Earliest check-in date must not be after latest check-in date",
+  path: ["latestCheckInDate"],
+});
 export type Constraints = z.infer<typeof ConstraintsSchema>;
 
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 /** Public trip parameters the host sets. Private limits never go here. */
 export const TripSchema = z.object({
   destination: z.string().trim().min(2).max(120),
@@ -34,8 +45,12 @@ export const OfferSchema = z.object({
   propertyName: z.string().min(1),
   city: z.string().min(1),
   roomType: z.string().min(1),
+  checkInDate: day,
+  checkOutDate: day,
   checkInAt: instant,
   checkOutAt: instant,
+  checkInTimeKnown: z.boolean(),
+  checkOutTimeKnown: z.boolean(),
   guestCapacity: z.number().int().nonnegative(),
   stepFreeVerified: z.boolean().nullable(),
   cancellationPolicyCode: z.enum(["FULL_CASH_REFUND", "TRAVEL_CREDIT", "NON_REFUNDABLE"]),
@@ -87,7 +102,9 @@ export type MerchantEvent = z.infer<typeof MerchantEventSchema>;
 
 export const ExtractionSchema = z.object({
   proposed: z.object({
-    maxContributionCents: money.optional(), latestCheckOutAt: instant.optional(),
+    maxContributionCents: money.optional(),
+    earliestCheckInDate: day.optional(), latestCheckInDate: day.optional(), latestCheckOutDate: day.optional(),
+    earliestCheckInAt: instant.optional(), latestCheckInAt: instant.optional(), latestCheckOutAt: instant.optional(),
     requiresFullCashRefund: z.boolean().optional(), requiresStepFreeAccess: z.boolean().optional(),
     softPreferences: z.array(z.object({ kind: z.enum(["LOWEST_PRICE", "WALKABLE", "NEAR_ACTIVITIES", "QUIET"]), weight: z.number().min(0).max(1) })).optional(),
   }).strict(),

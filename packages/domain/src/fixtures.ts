@@ -1,6 +1,6 @@
 import { OfferSchema, type Offer } from "./schemas.js";
 
-const stay = { checkInAt: "2027-03-10T21:00:00.000Z", checkOutAt: "2027-03-14T15:00:00.000Z" };
+const stay = { checkInDate: "2027-03-10", checkOutDate: "2027-03-14", checkInAt: "2027-03-10T21:00:00.000Z", checkOutAt: "2027-03-14T15:00:00.000Z", checkInTimeKnown: true, checkOutTimeKnown: true };
 const base = {
   offerVersion: "v1", merchantId: "accord-demo-merchant", merchantName: "Accord Demo Merchant",
   ...stay, guestCapacity: 4, stepFreeVerified: true, cancellationPolicyCode: "FULL_CASH_REFUND" as const,

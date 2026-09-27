@@ -3,5 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "dependencies": { "@accord/domain": "*", "@accord/integrations": "*", "zod": "^4.1.11", "mongodb": "^6.20.0" }
+  "dependencies": {
+    "@accord/domain": "*",
+    "@accord/integrations": "*",
+    "cybersource-rest-client": "^0.0.79",
+    "mongodb": "^6.20.0",
+    "zod": "^4.1.11"
+  }
 }

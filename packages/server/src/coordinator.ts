@@ -253,9 +253,9 @@ export class Coordinator {
   }
 
   onAllAuthorized(room: Room, proposal: Proposal) {
-    this.state.emit(room, "AUTOPILOT_READY_TO_BOOK", `Everyone approved Proposal v${proposal.version}. The host can verify and book.`, proposal.id, ACCORD);
-    this.state.notify(room, room.hostId, { kind: "READY_TO_BOOK", proposalId: proposal.id, title: "Everyone approved. You can book.",
-      body: `All ${proposal.snapshot.memberIds.length} members approved their exact share of Proposal v${proposal.version}. When you choose Verify and book, Accord re-checks the merchant’s current terms first and won’t book if anything changed.` });
+    this.state.emit(room, "AUTOPILOT_READY_TO_BOOK", `Everyone approved Proposal v${proposal.version}. Accord is verifying payment and booking automatically.`, proposal.id, ACCORD);
+    this.state.notify(room, room.hostId, { kind: "READY_TO_BOOK", proposalId: proposal.id, title: "Everyone approved. Accord is checking out.",
+      body: `All ${proposal.snapshot.memberIds.length} members approved their exact share of Proposal v${proposal.version}. Accord now re-checks the merchant’s current terms, authorizes the shared payment, and books only if nothing changed.` });
   }
 
   /** A merchant change can make a previously impossible trip possible again. */
@@ -302,7 +302,7 @@ export class Coordinator {
       await this.state.recheck(proposal);
       if (!isActive(proposal)) return;
     }
-    const pending = proposal.snapshot.memberIds.filter(id => proposal.authorizations.get(id)?.status !== "AUTHORIZED");
+    const pending = proposal.snapshot.memberIds.filter(id => proposal.approvals.get(id)?.status !== "APPROVED");
     const timeZone = room.trip?.timeZone ?? "America/New_York";
     if (!proposal.watch?.expiryWarnedAt && expiresAt - now <= this.options.expiryWarningMs) {
       proposal.watch = { ...proposal.watch, expiryWarnedAt: new Date(now).toISOString() };

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 
-export function useResource<T>(path: string | null, revision = 0) {
+export function useResource<T>(path: string | null, revision: unknown = 0) {
   const [state, setState] = useState<{ path: string | null; data?: T; error?: Error; loading: boolean }>({ path, loading: !!path });
   const [retry, setRetry] = useState(0);
   useEffect(() => {
