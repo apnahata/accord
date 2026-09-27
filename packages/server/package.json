@@ -6,6 +6,7 @@
   "dependencies": {
     "@accord/domain": "*",
     "@accord/integrations": "*",
+    "@solana/kit": "^8.3.0",
     "cybersource-rest-client": "^0.0.79",
     "mongodb": "^6.20.0",
     "zod": "^4.1.11"

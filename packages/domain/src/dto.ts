@@ -76,7 +76,11 @@ export type PublicProposalDTO = {
     transactionCount: number; authorizedTotalCents: number; requiredTotalCents: number;
   };
   expiresAt: string;
-  solana?: { status: 'NOT_RECORDED' | 'PENDING' | 'CONFIRMED' | 'FAILED'; transactionSignature?: string; explorerUrl?: string };
+  solana?: { purpose: 'GROUP_APPROVAL'; status: 'NOT_RECORDED' | 'PENDING' | 'CONFIRMED' | 'FAILED'; approvalBundleHash?: string; transactionSignature?: string; explorerUrl?: string };
+  /** Number of current exact-proposal approvals also signed by the member's Solana wallet. */
+  walletApproval: { signedCount: number; requiredCount: number };
+  /** Wallet attestations for the exact current proposal; these are public keys and signatures, never wallet secrets. */
+  walletAttestations: Array<{ publicKey: string; signature: string }>;
   /** PROVIDER_REQUOTE: re-priced with the provider; RECORD: compared to Accord's merchant record; SEARCH_TIME: not re-checkable after search. */
   watch?: { lastCheckedAt: string; method: 'PROVIDER_REQUOTE' | 'RECORD' | 'SEARCH_TIME' };
 };

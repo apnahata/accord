@@ -10,6 +10,9 @@ import { DecidedTrip, PlanningBoard, planSummary } from './planning';
 import type { AnalyticsDTO, ConsentResponseDTO, EventDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO } from './contracts';
 import type { MerchantMutation } from '@accord/domain';
 
+type SolanaWallet = { connect(): Promise<{ publicKey: { toBase58(): string } }>; signMessage(message: Uint8Array, display?: string): Promise<{ signature: Uint8Array }> };
+declare global { interface Window { solana?: SolanaWallet; phantom?: { solana?: SolanaWallet } } }
+
 function RoomNav({ roomId, active }: { roomId: string; active: 'room' | 'offers' }) { return <nav className="room-nav" aria-label="Group navigation"><Link aria-current={active === 'room' ? 'page' : undefined} to={`/rooms/${segment(roomId)}`}>Our group</Link><Link aria-current={active === 'offers' ? 'page' : undefined} to={`/rooms/${segment(roomId)}/offers`}>Explore stays</Link><Link to={`/rooms/${segment(roomId)}/me/summary`}><LockKeyhole size={14} />My private space</Link></nav>; }
 function Members({ room, base, onChange }: { room: PublicRoomDTO; base: string; onChange: () => void }) {
   const action = useAction();
@@ -112,6 +115,7 @@ function ProposalContent({ proposalId, privateView }: { proposalId: string; priv
   const idempotency = useRef(crypto.randomUUID());
   const [now, setNow] = useState(Date.now());
   const [acknowledgedHash, setAcknowledgedHash] = useState<string>();
+  const [walletAttestation, setWalletAttestation] = useState<{ publicKey: string; signature: string; proposalHash: string }>();
   const data = resource.data;
   const proposal = data?.proposal;
   const personal = data && 'myContributionCents' in data ? data : undefined;
@@ -122,6 +126,16 @@ function ProposalContent({ proposalId, privateView }: { proposalId: string; priv
   const approved = personal?.myApprovalStatus === 'APPROVED';
   const authorized = personal?.myPaymentStatus === 'AUTHORIZED' || personal?.myPaymentStatus === 'CAPTURED';
   const canSubmit = !!personal && personal.proposal.state === 'OPEN' && !expired && !approved && !resource.loading && !resource.error && acknowledgedHash === proposal?.proposalHash;
+  const signWithWallet = () => action.run(async () => {
+    if (!proposal) throw new Error('There is no current proposal to sign.');
+    const wallet = window.phantom?.solana ?? window.solana;
+    if (!wallet) throw new Error('Install a Solana wallet such as Phantom to add a wallet signature. You can still approve without one.');
+    const connected = await wallet.connect();
+    const message = new TextEncoder().encode(`Accord approval\nproposalId=${proposal.proposalId}\nversion=${proposal.version}\nproposalHash=${proposal.proposalHash}`);
+    const signed = await wallet.signMessage(message, 'utf8');
+    let binary = ''; for (const byte of signed.signature) binary += String.fromCharCode(byte);
+    setWalletAttestation({ publicKey: connected.publicKey.toBase58(), signature: btoa(binary), proposalHash: proposal.proposalHash });
+  });
   return <div className={`page ${privateView ? 'private-page' : ''}`}>
     {roomId && <Link to={`/rooms/${segment(roomId)}`} className="back-link"><ArrowLeft size={15} />Back to your group</Link>}
     <PageHeading eyebrow={privateView ? 'Your decision. Your exact contribution.' : 'One plan. Everyone on board.'} title={stale ? 'The offer changed. Your trust shouldn’t.' : proposal ? `A shared stay in ${proposal.offer.city}.` : 'Your shared proposal'} aside={proposal && <Tag>Proposal v{proposal.version}</Tag>} />
@@ -153,15 +167,18 @@ function ProposalContent({ proposalId, privateView }: { proposalId: string; priv
             {!stale && !approved && proposal.state === 'OPEN' && <>
               <p>You are approving Proposal v{proposal.version} and permitting Accord to process your exact {money(personal.myContributionCents)} share after everyone approves.</p>
               <p className="fine">If the price or terms change, this approval cannot be reused.</p>
+              <div className="wallet-proof"><p className="fine">Optional: sign this proposal with your Solana wallet. Your public wallet address and signature will be visible to this group. If everyone signs, Accord anchors a hash of the full bundle on devnet. This does not move funds.</p><Button className="secondary" disabled={!canSubmit || action.busy || walletAttestation?.proposalHash === proposal.proposalHash} onClick={signWithWallet}>{walletAttestation?.proposalHash === proposal.proposalHash ? `Wallet signature ready · ${walletAttestation.publicKey.slice(0, 4)}…${walletAttestation.publicKey.slice(-4)}` : action.busy ? 'Waiting for wallet…' : 'Add Solana wallet signature'}</Button></div>
               <label className="checkbox-row consent-checkbox"><input type="checkbox" checked={acknowledgedHash === proposal.proposalHash} onChange={event => setAcknowledgedHash(event.target.checked ? proposal.proposalHash : undefined)} /><span>I’ve reviewed this exact offer and my contribution.</span></label>
               <Button disabled={!canSubmit || action.busy} onClick={() => action.run(async () => {
                 try {
-                  const result = await post<ConsentResponseDTO>(`${base}/consent`, { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: personal.myContributionCents }, { 'Idempotency-Key': idempotency.current });
+                  const attestation = walletAttestation?.proposalHash === proposal.proposalHash ? { publicKey: walletAttestation.publicKey, signature: walletAttestation.signature } : undefined;
+                  const result = await post<ConsentResponseDTO>(`${base}/consent`, { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: personal.myContributionCents, ...(attestation ? { walletAttestation: attestation } : {}) }, { 'Idempotency-Key': idempotency.current });
                   if (result.proposalHash !== proposal.proposalHash || result.version !== proposal.version || result.amountCents !== personal.myContributionCents || result.approvalStatus !== 'APPROVED') throw new Error('We couldn’t verify the approval result. Refresh before trying again.');
-                } finally { setAcknowledgedHash(undefined); resource.refresh(); }
+                } finally { setAcknowledgedHash(undefined); setWalletAttestation(undefined); resource.refresh(); }
               })}>{action.busy ? 'Recording approval…' : `Approve my ${money(personal.myContributionCents)} share`}<ShieldCheck size={17} /></Button>
             </>}
             {approved && !stale && <div className="feasibility"><CheckCheck size={18} />Approval recorded for Proposal v{proposal.version}. {authorized ? 'The shared Visa authorization is confirmed.' : 'The shared payment starts automatically after everyone approves.'}</div>}
+            {proposal.walletApproval.signedCount > 0 && <p className="fine">{proposal.walletApproval.signedCount} of {proposal.walletApproval.requiredCount} members added a verified Solana wallet signature to this exact proposal version.</p>}
             <ErrorNotice error={action.error} /><PrivateNote />
           </section> : <section className="panel decision-invitation"><LockKeyhole size={22} /><h3>Make it your decision.</h3><p>Review your private checks and approve your exact contribution.</p><LinkButton to={`${base}/me`}>Review my part</LinkButton></section>}
           <Funding proposal={proposal} />

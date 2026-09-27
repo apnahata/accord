@@ -68,17 +68,17 @@ This ledger separates live provider proof from local synthetic tests, code paths
 
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
-- **Credentials/account:** No operator devnet signer configured.
-- **Feature:** Planned devnet operator commitment to the backend proposal hash.
-- **Why Accord needs it:** Provide an external reference to nonprivate proposal versions while backend consent remains authoritative.
-- **Implementation:** Generic adapter in `packages/integrations/src/solana.ts`; canonical hashes come from `@accord/domain`. No API transaction wiring.
-- **Code path:** Proposal DTO in `packages/server/src/state.ts` reports `NOT_RECORDED`.
-- **Live proof:** None.
+- **Credentials/account:** `SOLANA_SECRET_KEY` is present in the local `.env` and parses as a 32-byte base64 seed. The secret is never committed. Devnet is reachable and the operator wallet was confirmed ready for the smoke test.
+- **Feature:** Every member may optionally sign a clear message binding their wallet to the exact proposal ID, version, and backend proposal hash. The API verifies Ed25519 before recording normal consent. Once every member has both approved in Accord and provided a wallet signature, Accord writes a devnet Memo transaction containing the unchanged backend proposal hash and SHA-256 digest of the ordered signature bundle.
+- **Why Accord needs it:** Give members an independently held cryptographic receipt for the exact shared decision. A changed proposal has a different hash and needs fresh signatures. Accord's normal deterministic consent and payment checks remain authoritative.
+- **Implementation:** Optional Phantom/injected wallet signature in `frontend/src/pages-group.tsx`; Ed25519 verification in `packages/server/src/server.ts`; signed bundle and transaction retry state persisted with the proposal aggregate in `packages/server/src/state.ts`; devnet Memo and confirmation adapter in `packages/integrations/src/solana.ts`; operator signer loaded server-side from `.env` by `packages/server/src/solana-config.ts`.
+- **Code path:** Proposal DTO exposes aggregate counts and the wallet attestations for group verification. `solana.status` becomes `PENDING`/`CONFIRMED` only from the real adapter; explorer URL is returned only after RPC confirms the transaction.
+- **Live proof:** End-to-end test-only run through a local Accord API with four throwaway member keypairs: each signed the actual backend-created proposal, API accepted and counted four verified signatures, and Accord submitted the group-approval Memo. RPC lookup confirmed the on-chain proposal hash and bundle hash match. The test did not represent human users or book a stay.
 - **Screenshot:** None.
-- **Transaction/query/reference:** None; no signature or explorer URL exists.
+- **Transaction/query/reference:** [Four-member test-only group-approval transaction](https://explorer.solana.com/tx/28DteH8AmX2QmnKZ7Zgzr9KiivT8ZyVuqE34p8SPWA2w77X1QrMxAcLsfAKYo7AZV2WZPgCfBFSPwRgdXveh9aw4?cluster=devnet); slot `504650806`, 5,000 lamport fee. RPC `getTransaction` confirmed the `GROUP_APPROVED` Memo, backend proposal hash, and SHA-256 signature-bundle hash. The bundle hash recomputed from Accord's returned four public keys/signatures matched the chain data. [Separate adapter smoke-test transaction](https://explorer.solana.com/tx/4LPd7SejdydxsXyScKXKzF3T9tJwXXW4Te3Meod3AHi62vFXuNZoU1nM7JvvPfrs2fdWXH1hMXQeK3W3gECiGYcw?cluster=devnet).
 - **Failure behavior:** Backend consent stays enforced, and no explorer link is shown.
-- **Known limitations:** No funded devnet signer, genuine transaction, hash-difference test or confirmation proof.
-- **Submission status:** Not verified; do not claim an on-chain commitment yet.
+- **Known limitations:** The API-to-devnet group flow passed with four throwaway keypairs, but real humans have not completed it through browser wallets. Browser wallet compatibility, a live group demo, and process-restart recovery still need demonstration. Test transaction is not evidence that real people approved a proposal.
+- **Submission status:** API, cryptographic verification, bundle hashing, and confirmed devnet commitment have end-to-end test proof. Do not present the test transaction as human group consent.
 
 ## Vultr
 

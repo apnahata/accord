@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { addDays, AvailabilitySchema, ConstraintsSchema, ExtractionSchema, localDay, MerchantMutationSchema, PLANNING_HORIZON_DAYS, TRIP_STYLES, TripPlanSchema, TripSchema, TripStyleSchema, equalShares } from "@accord/domain";
+import { verifyProposalWalletSignature } from "../../integrations/src/solana.js";
 import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
@@ -18,6 +19,8 @@ import { normalizeModelCheckout } from "./model-time.js";
 import { respectExplicitOptionality, triageExtraction } from "./intake.js";
 import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
 import { cyberSourceFromEnv, type PaymentGateway } from "./payments.js";
+import { configuredSolana } from "./solana-config.js";
+import type { SolanaCommitments } from "../../integrations/src/solana.js";
 
 const name = z.string().trim().min(1).max(100);
 const credentials = z.object({
@@ -82,7 +85,7 @@ async function serveFrontend(path: string, response: ServerResponse) {
 
 export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence;
   liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; payment?: PaymentGateway; allowAnonymousAccounts?: boolean;
-  autopilot?: AutopilotOptions; tigerUrl?: string; pulse?: Pulse } = {}) {
+  autopilot?: AutopilotOptions; tigerUrl?: string; pulse?: Pulse; solana?: SolanaCommitments } = {}) {
   const persistence = options.persistence;
   const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
@@ -99,6 +102,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
     ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch, observe) } : {}),
     ...(payment ? { payment } : {}),
     ...(pulse ? { pulse } : {}),
+    ...(options.solana ? { solana: options.solana } : {}),
     ...(aiConfigured ? { summarize: async (facts: unknown) => {
       const result = await model.generate({ input: z.unknown(), output: z.object({ summary: z.string().max(400) }).strict() }, facts,
         "Write one or two plain sentences (max 45 words) telling a group of friends what this stay is like, using only the supplied public listing facts. No names of group members, no budgets, no invented facts, no marketing language.");
@@ -133,7 +137,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       const method = request.method ?? "GET";
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (method === "GET" && path === "/api/health") {
-        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "CONFIGURED" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", cybersource: payment ? "SANDBOX_CONFIGURED" : "UNCONFIGURED", tiger: pulse ? (await pulse.ping() ? "UP" : "DOWN") : "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
+        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "CONFIGURED" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", cybersource: payment ? "SANDBOX_CONFIGURED" : "UNCONFIGURED", tiger: pulse ? (await pulse.ping() ? "UP" : "DOWN") : "UNCONFIGURED", solana: options.solana ? (await options.solana.operatorReady() ? "UP" : "DOWN") : "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
       }
       if (method === "GET" && path === "/api/capabilities") {
         await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: !!pulse }, autopilot: { available: autopilot.enabled !== false }, liveSearch: { available: Boolean(liteApiKey || serpApiKey) } }); return;
@@ -373,7 +377,11 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           await send(200, explanation); return;
         }
         if (route === "consent" && method === "POST") {
-          const input = z.object({ proposalHash: z.string(), version: z.number().int(), amountCents: z.number().int().nonnegative() }).strict().parse(await readJson(request));
+          const input = z.object({ proposalHash: z.string(), version: z.number().int(), amountCents: z.number().int().nonnegative(), walletAttestation: z.object({ publicKey: z.string().min(32).max(44), signature: z.string().regex(/^[A-Za-z0-9+/]{86}==$|^[A-Za-z0-9+/]{87}=$|^[A-Za-z0-9+/]{88}$/) }).strict().optional() }).strict().parse(await readJson(request));
+          if (input.walletAttestation) {
+            if (!await verifyProposalWalletSignature({ publicKey: input.walletAttestation.publicKey, signatureBase64: input.walletAttestation.signature,
+              proposalId: proposal.id, version: proposal.version, proposalHash: proposal.hash })) throw new AppError(422, "INVALID_WALLET_ATTESTATION");
+          }
           if (!request.headers["idempotency-key"]) throw new AppError(422, "IDEMPOTENCY_KEY_REQUIRED");
           const key = request.headers["idempotency-key"];
           await send(200, await state.consent(proposal, room, member, input, typeof key === "string" ? key : "")); return;
@@ -459,7 +467,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.exit(1);
     }
   }
-  const { server, state } = createApi({ persistence });
+  let solana: SolanaCommitments | undefined;
+  try { solana = await configuredSolana(); }
+  catch { process.stderr.write("Solana devnet commitment disabled: SOLANA_SECRET_KEY is invalid.\n"); }
+  const { server, state } = createApi({ persistence, solana });
   await state.ready;
   const port = Number(process.env.PORT ?? "3000");
   server.listen(port, "0.0.0.0", () => process.stdout.write(`Accord API listening on ${port} (state: ${persistence ? "MongoDB" : "memory only"})\n`));

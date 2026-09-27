@@ -15,6 +15,7 @@ import { RoomStreams } from "../../integrations/src/realtime.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
 import type { ExternalRef, GoogleHotels, LiteApi, LiteRef, LiveStay, ProviderResult, StayResearch } from "./stays.js";
 import type { PaymentGateway } from "./payments.js";
+import type { CommitmentInput, CommitmentResult, SolanaCommitments } from "../../integrations/src/solana.js";
 import { SESSION_TTL_SECONDS, type MongoPersistence, type RoomAggregate, type SealedValue, type SessionRecord } from "./persistence.js";
 import { consumePasswordCost, hashPassword, normalizeEmail, verifyPassword } from "./auth.js";
 import type { Pulse } from "./pulse.js";
@@ -31,7 +32,9 @@ export type InboxEntry = {
 };
 export type Member = { id: string; userId: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number; inbox?: InboxEntry[] };
 type User = { id: string; displayName: string; createdAt: string; email?: string; passwordSalt?: string; passwordHash?: string };
-type Approval = { proposalHash: string; status: "APPROVED" | "INVALIDATED"; approvedAt: string };
+type Approval = { proposalHash: string; status: "APPROVED" | "INVALIDATED"; approvedAt: string; walletPublicKey?: string; walletSignature?: string };
+type CommitmentEvent = "GROUP_APPROVED";
+type StoredCommitment = CommitmentResult & { wireTransaction?: string; lastValidBlockHeight?: string; approvalBundleHash: string };
 type Authorization = { proposalHash: string; amountCents: number; status: "AUTHORIZED" | "INVALIDATED" | "CAPTURED" | "RELEASED" | "FAILED"; providerRef: string; captureRef?: string; reversalRef?: string };
 type PaymentLedgerEntry = {
   id: string; occurredAt: string; proposalHash: string; amountCents: number;
@@ -46,6 +49,7 @@ export type Proposal = {
   };
   state: "OPEN" | "READY_TO_EXECUTE" | "STALE" | "BOOKED" | "CANCELLED";
   approvals: Map<string, Approval>; authorizations: Map<string, Authorization>; ledger: PaymentLedgerEntry[];
+  commitments?: Partial<Record<CommitmentEvent, StoredCommitment>>;
   /** Provider handle for the approved stay (not part of the hashed snapshot; never private). */
   providerRef?: LiteRef | ExternalRef;
   /** Coordinator bookkeeping while the group decides; not part of the hashed snapshot. */
@@ -62,6 +66,7 @@ export type StayProviders = {
   liteApi?: LiteApi; google?: GoogleHotels; payment?: PaymentGateway; summarize?: (facts: unknown) => Promise<string | undefined>;
   /** Tiger Data market/process telemetry. Public prices and anonymous event types only. */
   pulse?: Pulse;
+  solana?: Pick<SolanaCommitments, "record" | "reconcile" | "resumeSigned">;
   /** Advisory only: proposes nearby destinations to search. Accord's checks still decide feasibility. */
   suggestAlternatives?: (input: AlternativesInput) => Promise<string[] | undefined>;
   /** Advisory only: proposes destinations from anonymous planning totals. */
@@ -142,6 +147,8 @@ export class AccordState {
   #removedMembers = new Set<string>();
   #removedSessions = new Set<string>();
   #activeExecutions = new Map<string, Promise<ReceiptDTO>>();
+  #commitmentJobs = new Set<string>();
+  #commitmentPolls = new Map<string, number>();
   #activeSolves = new Map<string, Promise<ProposalEnvelope | { noSolution: true }>>();
   #activeReversals = new Map<string, Promise<void>>();
 
@@ -151,6 +158,9 @@ export class AccordState {
     this.store = persistence ? persistence.merchantStore as MerchantBackend : new MemoryMerchantStore<Offer, MerchantEvent>();
     const merchant = this.merchant = new Merchant(this.store, merchantContract);
     this.ready = (async () => { if (persistence) await this.#hydrate(); await merchant.seed(demoCatalog()); await this.#migrateStoredOffers(); })();
+    void this.ready.then(() => {
+      for (const proposal of this.proposals.values()) if (proposal.commitments?.GROUP_APPROVED?.status === "PENDING") this.#queueGroupApprovalCommitment(proposal);
+    }).catch(() => undefined);
     this.streams = new RoomStreams(PublicEventSchema, PrivateEventSchema, async (request, roomId) => {
       const session = this.sessionFromCookie(request.headers.cookie);
       if (!session) return null;
@@ -683,7 +693,20 @@ export class AccordState {
       approval: { approvedCount: approved.length, requiredCount: proposal.snapshot.memberIds.length },
       authorization: { status: paymentStatus, transactionCount: shared?.providerRef ? 1 : 0,
         authorizedTotalCents: funded ? shared.amountCents : 0, requiredTotalCents: offer.totalCents },
-      expiresAt: proposal.snapshot.expiresAt, solana: { status: "NOT_RECORDED" },
+      expiresAt: proposal.snapshot.expiresAt,
+      solana: proposal.commitments?.GROUP_APPROVED ? {
+        purpose: "GROUP_APPROVAL",
+        status: proposal.commitments.GROUP_APPROVED.status,
+        approvalBundleHash: proposal.commitments.GROUP_APPROVED.approvalBundleHash,
+        ...(proposal.commitments.GROUP_APPROVED.transactionSignature ? { transactionSignature: proposal.commitments.GROUP_APPROVED.transactionSignature } : {}),
+        ...(proposal.commitments.GROUP_APPROVED.status === "CONFIRMED" && proposal.commitments.GROUP_APPROVED.explorerUrl ? { explorerUrl: proposal.commitments.GROUP_APPROVED.explorerUrl } : {}),
+      } : { purpose: "GROUP_APPROVAL", status: "NOT_RECORDED" },
+      walletApproval: { signedCount: approved.filter(value => !!value.walletPublicKey && !!value.walletSignature).length, requiredCount: proposal.snapshot.memberIds.length },
+      walletAttestations: proposal.snapshot.memberIds.flatMap(id => {
+        const approval = proposal.approvals.get(id);
+        return approval?.status === "APPROVED" && approval.proposalHash === proposal.hash && approval.walletPublicKey && approval.walletSignature
+          ? [{ publicKey: approval.walletPublicKey, signature: approval.walletSignature }] : [];
+      }),
       watch: { lastCheckedAt: proposal.watch?.lastCheckedAt ?? proposal.snapshot.createdAt,
         method: offer.source === "LITEAPI" ? "PROVIDER_REQUOTE" : offer.source === "GOOGLE_HOTELS" ? "SEARCH_TIME" : "RECORD" } };
     return { roomId: room.id, proposal: publicProposal,
@@ -731,15 +754,20 @@ export class AccordState {
     if (room.memberIds.length && room.memberIds.length !== proposal.snapshot.memberIds.length) changes.push({ label: "Equal share", before: money(Math.ceil(before.totalCents / proposal.snapshot.memberIds.length)), after: money(Math.ceil(after.totalCents / room.memberIds.length)) });
     return { ...envelope, changes };
   }
-  async consent(proposal: Proposal, room: Room, member: Member, input: { proposalHash: string; version: number; amountCents: number }, key: string) {
+  async consent(proposal: Proposal, room: Room, member: Member, input: { proposalHash: string; version: number; amountCents: number; walletAttestation?: { publicKey: string; signature: string } }, key: string) {
     if (room.activeProposalId !== proposal.id || proposal.state === "STALE" || proposal.state === "BOOKED") throw new AppError(409, "PROPOSAL_STALE");
     if (proposal.hash !== input.proposalHash || proposal.version !== input.version || proposal.snapshot.contributionsCents[member.id] !== input.amountCents) throw new AppError(409, "PROPOSAL_STALE");
     if (Date.parse(proposal.snapshot.expiresAt) <= Date.now() || member.capsuleVersion !== proposal.snapshot.privateCapsuleVersions[member.id]) throw new AppError(409, "PROPOSAL_STALE");
     if (!member.constraints) throw new AppError(409, "CONSTRAINTS_REQUIRED");
     if (checkMember(proposal.snapshot.offer, member.constraints, input.amountCents, room.memberIds.length).some(item => item.status !== "PASS")) throw new AppError(409, "OWN_CONSTRAINT_FAILED");
     const existing = proposal.approvals.get(member.id);
+    if (input.walletAttestation) {
+      const approval = existing?.status === "APPROVED" && existing.proposalHash === proposal.hash ? existing : undefined;
+      if (approval && approval.walletPublicKey !== input.walletAttestation.publicKey) throw new AppError(409, "WALLET_ATTESTATION_CONFLICT");
+      if (approval) { approval.walletSignature = input.walletAttestation.signature; approval.walletPublicKey = input.walletAttestation.publicKey; }
+    }
     if (existing?.status !== "APPROVED" || existing.proposalHash !== proposal.hash) {
-      proposal.approvals.set(member.id, { status: "APPROVED", proposalHash: proposal.hash, approvedAt: nowIso() });
+      proposal.approvals.set(member.id, { status: "APPROVED", proposalHash: proposal.hash, approvedAt: nowIso(), ...(input.walletAttestation ? { walletPublicKey: input.walletAttestation.publicKey, walletSignature: input.walletAttestation.signature } : {}) });
       this.#ledger(proposal, { type: "CONTRIBUTION_COMMITTED", memberId: member.id, amountCents: input.amountCents });
       this.emit(room, "MEMBER_APPROVED", "A member approved the exact proposal.", proposal.id);
     }
@@ -753,6 +781,11 @@ export class AccordState {
         this.#ledger(proposal, { type: "SHARED_AUTHORIZED", amountCents: simulated.amountCents, providerRef: simulated.providerRef });
       }
       this.providers.pulse?.event({ type: "PROPOSAL_READY", roomId: room.id, proposalId: proposal.id, metadata: { memberCount: proposal.snapshot.memberIds.length } });
+      const allWalletSigned = proposal.snapshot.memberIds.every(id => {
+        const approval = proposal.approvals.get(id);
+        return approval?.status === "APPROVED" && approval.proposalHash === proposal.hash && !!approval.walletPublicKey && !!approval.walletSignature;
+      });
+      if (allWalletSigned) this.#queueGroupApprovalCommitment(proposal);
       this.autopilot.onAllAuthorized(room, proposal);
       if (room.trip) await this.execute(proposal, room, this.members.get(room.hostId)!, `auto-${proposal.hash}-${key}`);
     }
@@ -1011,6 +1044,82 @@ export class AccordState {
     if (this.#sharedPayment(proposal)?.providerRef) setImmediate(() => void this.#releaseSharedPayment(proposal, room).catch(() => undefined));
     this.autopilot.onStale(room, proposal);
   }
+
+  #queueGroupApprovalCommitment(proposal: Proposal, delayMs = 0) {
+    if (!this.providers.solana) return;
+    const room = this.rooms.get(proposal.roomId);
+    if (!room) return;
+    const attestations = proposal.snapshot.memberIds.map(id => {
+      const approval = proposal.approvals.get(id)!;
+      return [approval.walletPublicKey, approval.walletSignature] as const;
+    });
+    const approvalBundleHash = createHash("sha256").update(JSON.stringify({ proposalHash: proposal.hash, attestations })).digest("hex");
+    const stored = proposal.commitments ??= {};
+    if (stored.GROUP_APPROVED && stored.GROUP_APPROVED.status !== "PENDING") return;
+    if (!stored.GROUP_APPROVED) stored.GROUP_APPROVED = { status: "PENDING", approvalBundleHash };
+    this.#dirtyRooms.add(room.id);
+    const key = `${proposal.id}:GROUP_APPROVED`;
+    if (this.#commitmentJobs.has(key)) return;
+    this.#commitmentJobs.add(key);
+    const timer = setTimeout(() => {
+      void this.#processGroupApprovalCommitment(proposal).then(status => {
+        this.#commitmentJobs.delete(key);
+        const polls = (this.#commitmentPolls.get(key) ?? 0) + 1;
+        if (status === "PENDING" && polls < 60) { this.#commitmentPolls.set(key, polls); this.#queueGroupApprovalRetry(proposal, 2_000); }
+        else this.#commitmentPolls.delete(key);
+      }).catch(() => this.#commitmentJobs.delete(key));
+    }, delayMs);
+    timer.unref();
+  }
+
+  #queueGroupApprovalRetry(proposal: Proposal, delayMs: number) {
+    const key = `${proposal.id}:GROUP_APPROVED`;
+    if (this.#commitmentJobs.has(key)) return;
+    this.#commitmentJobs.add(key);
+    const timer = setTimeout(() => {
+      void this.#processGroupApprovalCommitment(proposal).then(status => {
+        this.#commitmentJobs.delete(key);
+        const polls = (this.#commitmentPolls.get(key) ?? 0) + 1;
+        if (status === "PENDING" && polls < 60) { this.#commitmentPolls.set(key, polls); this.#queueGroupApprovalRetry(proposal, 2_000); }
+        else this.#commitmentPolls.delete(key);
+      }).catch(() => this.#commitmentJobs.delete(key));
+    }, delayMs);
+    timer.unref();
+  }
+
+  async #processGroupApprovalCommitment(proposal: Proposal): Promise<CommitmentResult["status"]> {
+    const solana = this.providers.solana!;
+    const room = this.rooms.get(proposal.roomId)!;
+    const stored = proposal.commitments!.GROUP_APPROVED!;
+    const before = `${stored.status}:${stored.transactionSignature ?? ""}:${stored.code ?? ""}`;
+    await this.flush();
+    const result = stored.transactionSignature
+      ? stored.wireTransaction && stored.lastValidBlockHeight
+        ? await solana.resumeSigned(stored.transactionSignature, stored.wireTransaction, stored.lastValidBlockHeight)
+        : await solana.reconcile(stored.transactionSignature)
+      : await solana.record({ roomPublicRef: createHash("sha256").update(room.id).digest("hex").slice(0, 32), proposalId: proposal.id,
+        proposalVersion: proposal.version, proposalHash: proposal.hash, eventType: "GROUP_APPROVED", approvalBundleHash: stored.approvalBundleHash }, async pending => {
+        stored.transactionSignature = pending.transactionSignature;
+        stored.wireTransaction = pending.wireTransaction;
+        stored.lastValidBlockHeight = pending.lastValidBlockHeight;
+        this.#dirtyRooms.add(room.id);
+        await this.flush();
+      });
+    stored.status = result.status;
+    stored.code = result.code;
+    stored.transactionSignature = result.transactionSignature ?? stored.transactionSignature;
+    stored.explorerUrl = result.status === "CONFIRMED" ? result.explorerUrl : undefined;
+    if (result.status !== "PENDING") { delete stored.wireTransaction; delete stored.lastValidBlockHeight; }
+    const after = `${stored.status}:${stored.transactionSignature ?? ""}:${stored.code ?? ""}`;
+    if (after !== before) {
+      this.#dirtyRooms.add(room.id);
+      this.emit(room, "SOLANA_COMMITMENT_UPDATED", result.status === "CONFIRMED"
+        ? "The exact group wallet approvals were anchored on Solana devnet."
+        : `Solana group-approval commitment is ${result.status.toLowerCase()}.`, proposal.id, { actor: "ACCORD" });
+    }
+    await this.flush();
+    return result.status;
+  }
   async mutate(offerId: string, expectedVersion: string, mutation: MerchantMutation) {
     let release!: () => void;
     const next = new Promise<void>(resolve => { release = resolve; });
@@ -1066,6 +1175,7 @@ export class AccordState {
         _id: proposal.id, roomId: proposal.roomId, version: proposal.version, hash: proposal.hash, state: proposal.state, providerRef: proposal.providerRef ?? null, watch: proposal.watch ?? null,
         snapshot: structuredClone(proposal.snapshot),
         approvals: Object.fromEntries(proposal.approvals), authorizations: Object.fromEntries(proposal.authorizations), ledger: structuredClone(proposal.ledger),
+        commitments: structuredClone(proposal.commitments ?? {}),
       })),
     };
   }
@@ -1114,7 +1224,7 @@ export class AccordState {
     for (const doc of data.proposals) {
       this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state, ...(doc.providerRef ? { providerRef: doc.providerRef } : {}), ...(doc.watch ? { watch: doc.watch } : {}),
         snapshot: { ...doc.snapshot, offer: compatibleOffer(doc.snapshot.offer) }, approvals: new Map(Object.entries(doc.approvals ?? {})), authorizations: new Map(Object.entries(doc.authorizations ?? {})),
-        ledger: Array.isArray(doc.ledger) ? doc.ledger as PaymentLedgerEntry[] : [] });
+        ledger: Array.isArray(doc.ledger) ? doc.ledger as PaymentLedgerEntry[] : [], commitments: doc.commitments ?? {} });
     }
     for (const doc of data.sessions) this.sessions.set(String(doc._id), { userId: String(doc.userId ?? doc.memberId), ...(doc.roomId ? { roomId: String(doc.roomId) } : {}), ...(doc.memberId ? { memberId: String(doc.memberId) } : {}), createdAt: new Date(doc.createdAt).toISOString() });
     for (const doc of data.invitations) this.invitations.set(String(doc._id), doc.roomId);
