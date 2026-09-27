@@ -134,7 +134,7 @@ test("host sees members and can remove only members who have not confirmed", asy
   assert.equal(removed.response.status, 200);
   assert.deepEqual(removed.data.members.map((m: any) => m.displayName), ["Host", "Ready"]);
   assert.equal(removed.data.memberCount, 2);
-  assert.equal((await call(`/rooms/${roomId}`, "GET", undefined, idle)).response.status, 403);
+  assert.equal((await call(`/rooms/${roomId}`, "GET", undefined, idle)).response.status, 401);
 });
 
 test("one frictionless device account can create multiple groups and revisit both", async t => {

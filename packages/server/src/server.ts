@@ -7,9 +7,12 @@ import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema, TripSchema
 import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
+import type { AlternativesInput, AutopilotOptions } from "./coordinator.js";
 import { MongoPersistence } from "./persistence.js";
 import { SESSION_TTL_SECONDS } from "./persistence.js";
 import { GoogleHotels, LiteApi } from "./stays.js";
+import { Pulse } from "./pulse.js";
+import { createTigerPool } from "../../integrations/src/tiger.js";
 import { normalizeModelCheckout } from "./model-time.js";
 import { respectExplicitOptionality, triageExtraction } from "./intake.js";
 import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
@@ -65,7 +68,8 @@ async function serveFrontend(path: string, response: ServerResponse) {
 }
 
 export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence;
-  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; payment?: PaymentGateway; allowAnonymousAccounts?: boolean } = {}) {
+  liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; payment?: PaymentGateway; allowAnonymousAccounts?: boolean;
+  autopilot?: AutopilotOptions; tigerUrl?: string; pulse?: Pulse } = {}) {
   const persistence = options.persistence;
   const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
@@ -74,18 +78,31 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
   const inviteUrl = (inviteToken: string) => publicAppUrl && /^https?:\/\//.test(publicAppUrl) ? `${publicAppUrl}/join/${encodeURIComponent(inviteToken)}` : undefined;
   const payment = options.payment ?? cyberSourceFromEnv(process.env);
   const allowAnonymousAccounts = options.allowAnonymousAccounts ?? process.env.ACCORD_TEST_ALLOW_ANONYMOUS === "1";
+  const tigerUrl = options.tigerUrl ?? process.env.TIGER_DATABASE_URL;
+  const pulse = options.pulse ?? (tigerUrl ? new Pulse(createTigerPool(tigerUrl)) : undefined);
+  const observe = pulse ? pulse.observe.bind(pulse) : undefined;
   const providers = {
-    ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch) } : {}),
-    ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch) } : {}),
+    ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch, observe) } : {}),
+    ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch, observe) } : {}),
     ...(payment ? { payment } : {}),
+    ...(pulse ? { pulse } : {}),
     ...(aiConfigured ? { summarize: async (facts: unknown) => {
       const result = await model.generate({ input: z.unknown(), output: z.object({ summary: z.string().max(400) }).strict() }, facts,
         "Write one or two plain sentences (max 45 words) telling a group of friends what this stay is like, using only the supplied public listing facts. No names of group members, no budgets, no invented facts, no marketing language.");
       return result.status === "OK" ? result.value.data.summary : undefined;
+    },
+    suggestAlternatives: async (input: AlternativesInput) => {
+      const result = await model.generate({
+        input: z.object({ destination: z.string(), countryCode: z.string(), checkIn: z.string(), checkOut: z.string(), guests: z.number(),
+          staysChecked: z.number(), staysAvailable: z.number(), staysFailing: z.record(z.string(), z.number()) }).strict(),
+        output: z.object({ destinations: z.array(z.string().min(2).max(120)).max(2) }).strict() }, input,
+        "A group could not find a shared stay that satisfies everyone's private requirements in the original destination. Suggest up to two nearby alternative destinations in the same country, reachable for the same trip dates, where suitable stays are more likely (for example cheaper nearby cities when many stays failed on budget). Use only the supplied trip facts and anonymous totals. Format each as 'City, ST'. Return an empty list if nothing nearby makes sense.");
+      return result.status === "OK" ? result.value.data.destinations : undefined;
     } } : {}),
   };
-  let state = new AccordState(persistence, providers);
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+  const autopilot: AutopilotOptions = { enabled: process.env.ACCORD_AUTOPILOT !== "off", ...options.autopilot };
+  let state = new AccordState(persistence, providers, autopilot);
   const server = createServer(async (request, response) => {
     // Nothing is acknowledged to a client until the changes it caused are durable.
     const send = async (status: number, body: unknown) => { await state.flush(); json(response, status, body); };
@@ -93,10 +110,10 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       const method = request.method ?? "GET";
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (method === "GET" && path === "/api/health") {
-        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "CONFIGURED" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", cybersource: payment ? "SANDBOX_CONFIGURED" : "UNCONFIGURED", tiger: "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
+        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "CONFIGURED" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", cybersource: payment ? "SANDBOX_CONFIGURED" : "UNCONFIGURED", tiger: pulse ? (await pulse.ping() ? "UP" : "DOWN") : "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
       }
       if (method === "GET" && path === "/api/capabilities") {
-        await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: false } }); return;
+        await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: !!pulse }, autopilot: { available: autopilot.enabled !== false }, liveSearch: { available: Boolean(liteApiKey || serpApiKey) } }); return;
       }
       if (method === "POST" && path === "/api/auth/register") {
         const input = credentials.extend({ displayName: z.string().trim().min(1).max(60) }).parse(await readJson(request));
@@ -235,9 +252,16 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
             : "I have a draft for you to review. Nothing has been applied yet.";
           await send(200, { stage: "REVIEW", reply, constraints, requiresConfirmation: true, followUps: triage.followUps, notChecked: triage.notChecked }); return;
         }
+        if (route === "me/inbox" && method === "GET") { await send(200, state.inbox(member)); return; }
+        const respondMatch = /^me\/inbox\/([^/]+)\/respond$/.exec(route);
+        if (respondMatch && method === "POST") {
+          const input = z.object({ action: z.enum(["ACCEPT", "KEEP"]) }).strict().parse(await readJson(request));
+          state.autopilot.respond(room, member.id, roomParam(respondMatch[1]!), input.action);
+          await send(200, state.inbox(member)); return;
+        }
         if (route === "solve" && method === "POST") {
           await readJson(request);
-          const result = await state.solve(room);
+          const result = await state.autopilot.solveNow(room);
           if ("noSolution" in result) { await send(409, { code: "NO_FEASIBLE_OFFER" }); return; }
           await send(200, result); return;
         }
@@ -322,11 +346,26 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       if (path === "/api/demo/reset" && method === "POST") {
         const session = sessionRequired(state, request); if (!session.roomId) throw new AppError(403, "ROOM_ACCESS_DENIED"); state.requireHost(session.roomId, session);
         z.object({ confirmed: z.literal(true) }).strict().parse(await readJson(request));
-        state.streams.close(); await persistence?.clear(); state = new AccordState(persistence, providers); await state.ready;
+        state.autopilot.dispose(); state.streams.close(); await persistence?.clear(); state = new AccordState(persistence, providers, autopilot); await state.ready;
         response.setHeader("set-cookie", "accord_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
         await send(200, { reset: true, sessionsInvalidated: true }); return;
       }
-      if (path === "/api/demo/analytics" && method === "GET") throw new AppError(503, "TIGER_UNAVAILABLE");
+      // Public, anonymous market + consensus dashboard served from Tiger Data.
+      if (path === "/api/pulse" && method === "GET") {
+        if (!pulse) throw new AppError(503, "TIGER_UNAVAILABLE");
+        try { await send(200, await pulse.dashboard()); } catch { throw new AppError(503, "TIGER_UNAVAILABLE"); }
+        return;
+      }
+      if (path === "/api/demo/analytics" && method === "GET") {
+        const session = sessionRequired(state, request);
+        if (!session.roomId) throw new AppError(403, "ADMIN_ACCESS_DENIED");
+        const { room } = state.requireHost(session.roomId, session);
+        const proposal = room.activeProposalId ? state.proposals.get(room.activeProposalId) : undefined;
+        if (!pulse || !room.trip || !proposal) throw new AppError(503, "TIGER_UNAVAILABLE");
+        let history;
+        try { history = await pulse.offerHistory(room.trip, proposal.snapshot.offer.offerId); } catch { throw new AppError(503, "TIGER_UNAVAILABLE"); }
+        await send(200, { source: "TIGER", points: history.map(point => ({ at: point.at, totalCents: point.totalCents, label: proposal.snapshot.offer.propertyName })) }); return;
+      }
       if (path === "/api/intake/transcribe" && method === "POST") throw new AppError(503, "ELEVENLABS_UNAVAILABLE");
       if (method === "GET" && !path.startsWith("/api/")) { await serveFrontend(path, response); return; }
       throw new AppError(404, "NOT_FOUND");
@@ -341,6 +380,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       json(response, 500, { code: "INTERNAL_ERROR" });
     }
   });
+  server.on("close", () => state.autopilot.dispose());
   return { server, get state() { return state; } };
 }
 

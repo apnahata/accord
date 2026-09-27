@@ -4,5 +4,5 @@ export type {
   PrivateProposalDTO, ConsentResponseDTO, CapsuleDTO, Capabilities,
   MemoryDTO, EventDTO, PublicChange, ProposalEnvelope,
   PrivateProposalEnvelope, OffersDTO, ReceiptDTO, MerchantDTO, AnalyticsDTO,
-  AccountDTO,
+  AccountDTO, PulseDTO, AutopilotDTO, InboxDTO, InboxMessageDTO,
 } from "@accord/domain";

@@ -25,7 +25,7 @@ The existing `RoomStreams` implementation uses a single process. Run exactly one
    docker compose --env-file .env ps
    ```
 
-6. Verify HTTPS, genuine core health, four distinct member sessions, a merchant mutation, stale consent, private member reasons, replan, fresh authorization and one demo receipt. Use the HTTP helper below in addition to a real four-browser rehearsal.
+6. Verify HTTPS, genuine core health, four distinct member sessions, a merchant mutation, stale consent, private member reasons, the automatic replan (Accord proposes v2 without a manual solve unless `ACCORD_AUTOPILOT=off`), fresh authorization and one demo receipt. Use the HTTP helper below in addition to a real four-browser rehearsal.
 
 Caddy obtains TLS for the configured domain and flushes streaming responses immediately. Keep its persistent `/data` volume for certificate state. No credentials are embedded in the proxy config. The app container receives the secret environment; the proxy receives only the hostname.
 

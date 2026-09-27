@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Check, CheckCheck, CircleHelp, ExternalLink, LockKeyhole, MapPin, ShieldCheck, Users, X } from 'lucide-react';
+import { ArrowRight, Check, CheckCheck, CircleHelp, ExternalLink, LockKeyhole, MapPin, ShieldCheck, Sparkles, Users, X } from 'lucide-react';
 import type { EventDTO, PublicOfferDTO, PublicProposalDTO, PublicChange } from './contracts';
 import { calendarDate, date, dateTime, money, safeExplorer } from './api';
+import { Sparkline } from './charts';
 
 export function Brand() { return <Link to="/" className="brand" aria-label="Accord home"><span className="brand-mark" aria-hidden="true">a</span>accord<span className="brand-dot">®</span></Link>; }
 export function Button({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) { return <button {...props} className={`button ${props.className || ''}`}>{children}</button>; }
@@ -27,8 +28,16 @@ export function OfferFacts({ offer }: { offer: PublicOfferDTO }) {
   return <dl className="offer-facts"><div><dt>Stay</dt><dd>{calendarDate(offer.checkInDate)} – {calendarDate(offer.checkOutDate)}</dd></div><div><dt>Room</dt><dd>{offer.roomType}</dd></div><div><dt>Capacity</dt><dd>{offer.guestCapacity} guests</dd></div><div><dt>Cancellation</dt><dd>{offer.cancellationLabel}</dd></div><div><dt>Accessibility evidence</dt><dd>{offer.stepFreeVerified === null ? 'Step-free access unverified' : offer.stepFreeVerified ? 'Verified step-free access' : 'Not verified step-free'}</dd></div><div><dt>Check-in</dt><dd>{offer.checkInTimeKnown ? dateTime(offer.checkInAt) : 'Time not provided by hotel'}</dd></div><div><dt>Checkout</dt><dd>{offer.checkOutTimeKnown ? dateTime(offer.checkOutAt) : 'Time not provided by hotel'}</dd></div></dl>;
 }
 export function Stability({ offer }: { offer: PublicOfferDTO }) {
-  if (!offer.stability) return null;
-  return <div className="stability" title="Observed stability during this Accord planning session. Not a prediction of future prices."><span className="stability-bars" aria-hidden="true">▂▄▃▅</span><span>{offer.stability.label.toLowerCase()} · {offer.stability.materialChangeCount} material changes <small>{offer.stability.observationCount} observations this session</small></span></div>;
+  const stability = offer.stability;
+  if (!stability) return null;
+  const changes = stability.materialChangeCount;
+  const history = (stability.history ?? []).map(point => ({ at: point.at, value: point.totalCents }));
+  if (stability.observationCount < 2) return <div className="stability" title="Accord records every price it sees in Tiger Data."><span><strong>Price tracking started</strong><small>Accord re-checks prices over time; stability appears after the next check.</small></span></div>;
+  return <div className={`stability ${stability.label.toLowerCase()}`} title="Observed by Accord over the last 24 hours (Tiger Data). Not a prediction of future prices.">
+    <span><strong>{stability.label === 'STABLE' ? 'Stable price' : stability.label === 'MIXED' ? 'Price moved' : 'Volatile price'}</strong> · {changes === 0 ? 'no changes' : `${changes} change${changes === 1 ? '' : 's'}`}{stability.minCents !== undefined && stability.maxCents !== undefined && stability.minCents !== stability.maxCents ? ` · ${money(stability.minCents)}–${money(stability.maxCents)}` : ''}
+      <small>{stability.observationCount} price checks in the last 24h{stability.label === 'VOLATILE' ? ' · approve soon or expect a re-check' : ''}</small></span>
+    <Sparkline points={history} format={money} />
+  </div>;
 }
 export function Research({ offer }: { offer: PublicOfferDTO }) {
   const research = offer.research;
@@ -52,7 +61,8 @@ export function Integrity({ proposal, previousHash, currentHash }: { proposal: P
 export function Stale({ changes, children }: { changes?: PublicChange[]; children?: ReactNode }) {
   return <section className="stale-panel" role="status"><div className="stale-symbol" aria-hidden="true"><span /><span /></div><p className="eyebrow">Protected by Accord</p><h2>Consent stale</h2><p className="stale-lead">This is no longer the offer the group approved.</p>{!!changes?.length && <dl className="changes">{changes.map((change, i) => <div key={i}><dt>{change.label}</dt><dd><del>{change.before}</del><ArrowRight size={16} /><strong>{change.after}</strong></dd></div>)}</dl>}<p>Accord paused the purchase. The updated offer cannot use the group’s previous authorizations.</p>{children}</section>;
 }
-export function Timeline({ events }: { events: EventDTO[] }) {
-  return <section className="panel"><div className="section-heading"><h3>Coming together</h3><span className="eyebrow">Activity</span></div>{events.length === 0 ? <p className="subtle">Your group’s activity will appear here.</p> : <ol className="timeline">{events.map(event => <li key={event.id}><span className="timeline-dot" /><div><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</time><strong>{event.title}</strong>{event.detail && <p>{event.detail}</p>}</div></li>)}</ol>}</section>;
+export function Timeline({ events, limit = 14 }: { events: EventDTO[]; limit?: number }) {
+  const shown = [...events].reverse().slice(0, limit);
+  return <section className="panel"><div className="section-heading"><h3>Coming together</h3><span className="eyebrow">Latest first</span></div>{events.length === 0 ? <p className="subtle">Your group’s activity will appear here.</p> : <ol className="timeline">{shown.map(event => <li key={event.id} className={event.actor ? `actor-${event.actor.toLowerCase()}` : ''}><span className="timeline-dot" /><div><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}{event.actor === 'ACCORD' && <span className="actor-badge"><Sparkles size={10} />Accord</span>}{event.actor === 'MERCHANT' && <span className="actor-badge merchant">Merchant</span>}</time><strong>{event.title}</strong>{event.detail && <p>{event.detail}</p>}</div></li>)}</ol>}</section>;
 }
 export function CheckStatus({ status }: { status: 'PASS' | 'FAIL' | 'UNKNOWN' }) { return <span className={`check-status ${status.toLowerCase()}`} aria-label={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Does not pass' : 'Unknown'}>{status === 'PASS' ? <Check size={18} /> : status === 'FAIL' ? <X size={18} /> : <CircleHelp size={17} />}</span>; }

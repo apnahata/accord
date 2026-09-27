@@ -10,6 +10,12 @@ export type PublicRoomDTO = {
   /** Present when the host created the room with real trip details (live search). */
   trip?: Trip;
   lastSearch?: { searchedAt: string; providers: Array<{ provider: string; status: string; count: number }> };
+  /** What Accord's coordinator is doing on its own right now. Public-safe; never names a blocking member. */
+  autopilot: AutopilotDTO;
+};
+export type AutopilotDTO = {
+  status: 'IDLE' | 'WAITING_FOR_MEMBERS' | 'SEARCHING' | 'REPLANNING' | 'WIDENING' | 'WATCHING' | 'NO_OPTION';
+  message: string;
 };
 export type StayResearchDTO = { sourceLabel: string; pros: string[]; cons: string[]; nearby: string[]; summary?: string };
 export type PublicOfferDTO = {
@@ -25,7 +31,9 @@ export type PublicOfferDTO = {
   bookingMode: 'SIMULATED' | 'SANDBOX' | 'EXTERNAL';
   imageUrl?: string; address?: string; rating?: number; reviewCount?: number; externalUrl?: string;
   research?: StayResearchDTO;
-  stability?: { observationCount: number; materialChangeCount: number; label: 'STABLE' | 'MIXED' | 'VOLATILE' };
+  /** Observed price stability for this exact trip (Tiger Data). history: 5-minute buckets, latest price per bucket. */
+  stability?: { observationCount: number; materialChangeCount: number; label: 'STABLE' | 'MIXED' | 'VOLATILE';
+    minCents?: number; maxCents?: number; history?: Array<{ at: string; totalCents: number }> };
 };
 export type PublicProposalDTO = {
   proposalId: string; version: number; proposalHash: string;
@@ -39,6 +47,8 @@ export type PublicProposalDTO = {
   };
   expiresAt: string;
   solana?: { status: 'NOT_RECORDED' | 'PENDING' | 'CONFIRMED' | 'FAILED'; transactionSignature?: string; explorerUrl?: string };
+  /** PROVIDER_REQUOTE: re-priced with the provider; RECORD: compared to Accord's merchant record; SEARCH_TIME: not re-checkable after search. */
+  watch?: { lastCheckedAt: string; method: 'PROVIDER_REQUOTE' | 'RECORD' | 'SEARCH_TIME' };
 };
 export type PrivateProposalDTO = {
   proposal: PublicProposalDTO; myContributionCents: number;
@@ -60,9 +70,18 @@ export type CapsuleDTO = { displayName: string; constraints: Constraints | null;
 export type Capabilities = {
   ai: { available: boolean }; elevenLabs: { available: boolean };
   backboard: { available: boolean }; tiger: { available: boolean };
+  autopilot: { available: boolean }; liveSearch: { available: boolean };
 };
 export type MemoryDTO = { id: string; label: string; applied: boolean };
-export type EventDTO = { id: string; occurredAt: string; title: string; detail?: string };
+export type EventDTO = { id: string; occurredAt: string; title: string; detail?: string; actor?: 'ACCORD' | 'MERCHANT' | 'GROUP' };
+/** Private to one member. Only that member's own limits may appear in title/body. */
+export type InboxMessageDTO = {
+  id: string; at: string;
+  kind: 'STALE_REASON' | 'NUDGE' | 'REMINDER' | 'READY_TO_BOOK' | 'EXPIRING' | 'INFO';
+  title: string; body: string; proposalId?: string;
+  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT'; acceptLabel: string; keepLabel: string };
+};
+export type InboxDTO = { messages: InboxMessageDTO[] };
 export type PublicChange = { label: string; before: string; after: string };
 export type ProposalEnvelope = {
   roomId: string; proposal: PublicProposalDTO; changes?: PublicChange[];
@@ -107,4 +126,13 @@ export type MerchantDTO = {
 };
 export type AnalyticsDTO = {
   source: 'TIGER'; points: Array<{ at: string; totalCents: number; label: string }>;
+};
+export type PulseDTO = {
+  source: 'TIGER'; queryMs: number; generatedAt: string;
+  totals: { observations: number; listings: number; destinations: number; firstObservedAt?: string; byProvider: Record<string, number> };
+  storage: { totalBytes: number; chunks: number; compressedChunks: number; beforeBytes: number; afterBytes: number; ratio?: number };
+  markets: Array<{ destination: string; points: Array<{ at: string; nightlyCents: number }> }>;
+  movers: Array<{ offerId: string; propertyName: string; destination: string; changes: number; minCents: number; maxCents: number; latestCents: number }>;
+  consensus: { proposals: number; ready: number; stale: number; booked: number; medianMinutesToReady?: number; medianSecondsStaleToReplan?: number; medianStaleDetectionMs?: number };
+  activity: Array<{ at: string; counts: Record<string, number> }>;
 };

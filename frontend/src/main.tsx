@@ -9,6 +9,7 @@ import { Intake } from './pages-intake';
 import { Room, Offers, Proposal, Receipt, Merchant } from './pages-group';
 import { Account } from './pages-account';
 import { Auth } from './pages-auth';
+import { Pulse } from './pages-pulse';
 import { post } from './api';
 import { useAction, useResource } from './hooks';
 import type { AccountDTO } from './contracts';
@@ -52,9 +53,10 @@ function App() {
       <Route path="/proposals/:proposalId/me" element={<Proposal privateView />} />
       <Route path="/demo/merchant" element={<Merchant />} />
       <Route path="/rooms/:roomId/demo/merchant" element={<Merchant />} />
+      <Route path="/pulse" element={<Pulse />} />
       <Route path="*" element={<div className="page narrow"><h1>A little off course.</h1><p>This page doesn’t exist.</p><Link to="/" className="button">Return home</Link></div>} />
     </Routes></main>
-    <footer className="site-footer"><Brand /><span>Good plans start with common ground.</span><span className="footer-note">Personal boundaries. Shared possibilities.</span></footer>
+    <footer className="site-footer"><Brand /><span>Good plans start with common ground.</span><Link to="/pulse" className="footer-link">Market pulse</Link><span className="footer-note">Personal boundaries. Shared possibilities.</span></footer>
   </>;
 }
 

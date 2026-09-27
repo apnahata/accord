@@ -2,6 +2,7 @@ import { Pool } from "pg";
 import type { PoolConfig } from "pg";
 import { z } from "zod";
 import { attempt } from "./result.js";
+import { TIMESCALE_CLOUD_CA } from "./timescale-ca.js";
 
 // Deliberately narrow storage projection. No arbitrary text, member IDs or private fields.
 const metadata = z.strictObject({
@@ -30,7 +31,13 @@ const event = z.strictObject({
 export type TigerEvent = z.infer<typeof event>;
 
 export function createTigerPool(connectionString: string, ssl?: PoolConfig["ssl"]) {
-  return new Pool({ connectionString, ssl, max: 5, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10_000, statement_timeout: 5000 });
+  const url = new URL(connectionString);
+  if (!ssl && url.hostname.endsWith(".tsdb.cloud.timescale.com")) {
+    // pg lets `sslmode` in the URL override `ssl`, so drop it and verify against Tiger Cloud's CA explicitly.
+    url.searchParams.delete("sslmode");
+    ssl = { ca: TIMESCALE_CLOUD_CA, rejectUnauthorized: true };
+  }
+  return new Pool({ connectionString: url.toString(), ssl, max: 5, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10_000, statement_timeout: 5000 });
 }
 
 export class Tiger {
