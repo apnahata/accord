@@ -382,3 +382,19 @@ test("rehearsal stays are deterministic and cover the trip exactly", async () =>
   }
   assert.ok(first[0]!.totalCents < first[2]!.totalCents);
 });
+
+test("a named place nobody can afford doesn't block the trip: Accord falls back to its other picks", async t => {
+  const call = await start(t);
+  const low = { maxContributionCents: 18000, availability: [{ from: day(30), to: day(45) }], tripStyles: ["BEACH", "CITY", "THEME_PARKS"] };
+  const { roomId, cookies } = await plannedGroup(call, {
+    Alex: { ...low, placeIdeas: "Miami" }, Priya: low, Jordan: low, Mateo: low,
+  });
+  const room = async () => (await call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data;
+  const planned = await waitFor(async () => { const data = await room(); return (data.planning?.stage === "VOTING" || data.activeProposalId || data.planning?.stage === "NO_OPTION") && data; }, "a plan");
+  assert.notEqual(planned.planning?.stage, "NO_OPTION", "an unaffordable request must not leave the group without a trip");
+  const destinations = planned.trip ? [planned.trip.destination] : planned.planning.options.map((option: any) => option.destination);
+  assert.ok(destinations.length && destinations.every((name: string) => name !== "Miami, FL"));
+  const events = (await call(`/rooms/${roomId}/events`, "GET", undefined, cookies.Alex)).data.events.map((event: any) => event.title);
+  assert.ok(events.some((title: string) => /None of the places the group asked for works for everyone/.test(title)));
+  assert.ok(!JSON.stringify(events).includes("18000") && !JSON.stringify(events).includes("$180"), "the fallback never reveals anyone's budget");
+});
