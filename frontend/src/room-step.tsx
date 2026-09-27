@@ -83,7 +83,8 @@ function VoteCard({ room, base, planning, onChange }: { room: Room; base: string
         <p className="subtle">{dayRange(option.checkIn, option.checkOut)} · {option.nights} nights</p>
         <p className="subtle">{option.propertyName}</p>
         {option.why.length > 0 && <ul className="why-list">{option.why.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
-        <p className="step-price"><strong>{money(option.equalShareCents)}</strong> per person</p>
+        <p className="step-price"><strong>{money(option.totalCents)}</strong> total</p>
+        <p className="subtle">Split {room.memberCount} ways: {money(option.equalShareCents)} each</p>
         {option.votes !== undefined && <p className="subtle">{option.votes} {option.votes === 1 ? 'vote' : 'votes'}</p>}
         {chosen ? <p className="my-vote"><Check size={15} />Your vote</p> : <Button className={planning.myVoteOptionId ? 'secondary' : ''} disabled={action.busy} onClick={() => vote(option.id)}>{planning.myVoteOptionId ? 'Switch to this' : 'Choose this trip'}</Button>}
       </article>;
@@ -117,14 +118,15 @@ function ProposalCard({ base, proposal, personal, onChange }: { base: string; pr
       <h3>{offer.propertyName}</h3>
       <p className="subtle">{offer.city} · {calendarDate(offer.checkInDate)} – {calendarDate(offer.checkOutDate)}</p>
       <a className="listing-link" href={offer.externalUrl ?? `https://www.google.com/search?q=${encodeURIComponent(`${offer.propertyName} ${offer.city}`)}`} target="_blank" rel="noopener noreferrer">{offer.externalUrl ? 'View the listing' : 'Look up this hotel'}<ExternalLink size={14} /></a>
-      <p className="step-price"><strong>{money(amount)}</strong> for you</p>
+      <p className="step-price"><strong>{money(offer.totalCents)}</strong> total</p>
+      <p className="subtle">Your share: {money(amount)} (split {required} ways)</p>
       <p>{approved} of {required} said yes.</p>
       <div className="step-action">
         {proposal.proposal.state === 'BOOKED'
           ? <LinkButton to={`${base}/receipt`}>See the receipt</LinkButton>
           : mine
             ? null
-            : <Button disabled={!personal || action.busy} onClick={sayYes}>{action.busy ? 'Saving…' : `Yes · ${money(amount)}`}</Button>}
+            : <Button disabled={!personal || action.busy} onClick={sayYes}>{action.busy ? 'Saving…' : `Approve my ${money(amount)} share`}</Button>}
       </div>
       <ErrorNotice error={action.error} />
     </div>

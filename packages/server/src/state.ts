@@ -623,7 +623,8 @@ export class AccordState {
         const existingRaw = await tx.getOffer(offer.offerId);
         const existing = existingRaw ? { ...existingRaw, offer: compatibleOffer(existingRaw.offer), original: compatibleOffer(existingRaw.original) } : undefined;
         if (!existing) { await tx.putOffer(offer.offerId, { offer, original: structuredClone(offer), failNextBooking: false, booked: false }); continue; }
-        if (existing.booked || options.keepExisting) continue;
+        // A demo-console change stands until it's restored; a live re-quote must not quietly erase it.
+        if (existing.booked || options.keepExisting || existingRaw?.simulated) continue;
         const candidate = { ...offer, offerVersion: existing.offer.offerVersion, expiresAt: existing.offer.expiresAt };
         const next = materialOfferEquals(candidate, existing.offer)
           ? { ...existing.offer, expiresAt: offer.expiresAt, imageUrl: offer.imageUrl, rating: offer.rating, reviewCount: offer.reviewCount }
@@ -726,8 +727,14 @@ export class AccordState {
       this.emit(room, "SOLVE_STARTED", isLive(room) ? "Accord started replanning from the current observed stays." : trigger === "REPLAN" ? "Accord is re-checking every demo stay against everyone’s confirmed requirements." : "Accord started checking current demo stays.", undefined, { actor: "ACCORD" });
     }
     const data = await this.offers(room);
-    if (!data.recommendedOfferId) { this.emit(room, "SOLVE_COMPLETED", "No current stay satisfies every confirmed requirement.", undefined, { actor: "ACCORD", detail: `Checked ${data.offers.length} stays.` }); return { noSolution: true }; }
-    const offer = (await this.currentOffer(data.recommendedOfferId))!;
+    // After the proposed stay changes, keep offering that same stay if it still works for everyone, so the
+    // group is asked plainly whether the new terms are OK instead of being silently moved somewhere else.
+    const previous = room.activeProposalId ? this.proposals.get(room.activeProposalId) : undefined;
+    const same = trigger === "REPLAN" && previous?.state === "STALE"
+      ? data.offers.find(item => item.offerId === previous.snapshot.offer.offerId && item.feasible && (!isLive(room) || item.source === "LITEAPI")) : undefined;
+    const chosenId = same?.offerId ?? data.recommendedOfferId;
+    if (!chosenId) { this.emit(room, "SOLVE_COMPLETED", "No current stay satisfies every confirmed requirement.", undefined, { actor: "ACCORD", detail: `Checked ${data.offers.length} stays.` }); return { noSolution: true }; }
+    const offer = (await this.currentOffer(chosenId))!;
     const assessment = assessOffer(offer, members);
     if (!assessment.feasible) throw new AppError(409, "OFFER_CHANGED");
     const id = randomUUID(), version = ++room.version, createdAt = nowIso();
@@ -742,8 +749,11 @@ export class AccordState {
     const share = money(Math.ceil(offer.totalCents / room.memberIds.length));
     this.emit(room, "SOLVE_COMPLETED", `${suitable} of ${data.offers.length} ${isLive(room) ? "live" : "demo"} stays meet every confirmed requirement.`, undefined, { actor: "ACCORD" });
     if (isLive(room)) void this.#summarize(room, data.offers.filter(item => item.feasible).slice(0, 3).map(item => item.offerId));
-    const title = trigger === "REPLAN" || trigger === "WIDEN"
-      ? `Accord found a new option: ${offer.propertyName} in ${offer.city}, ${share} each. Proposal v${version} needs everyone’s fresh approval.`
+    const was = previous?.snapshot.offer;
+    const title = same && was
+      ? `${offer.propertyName} changed: now ${money(offer.totalCents)} total, ${share} each (was ${money(was.totalCents)}, ${money(Math.ceil(was.totalCents / previous.snapshot.memberIds.length))} each). It still works for everyone, so Accord is asking each person to approve the new terms (Proposal v${version}).`
+      : trigger === "REPLAN" || trigger === "WIDEN"
+      ? `Accord found a new option: ${offer.propertyName} in ${offer.city}, ${money(offer.totalCents)} total (${share} each). Proposal v${version} needs everyone’s fresh approval.`
       : `Accord proposed ${offer.propertyName} in ${offer.city}: ${share} each (Proposal v${version}).`;
     this.emit(room, "PROPOSAL_CREATED", title, id, { actor: "ACCORD", detail: "It meets every member’s confirmed requirements. Nothing is booked until each person approves their exact share." });
     void this.#recordSolanaCommitment(room, proposal, "PROPOSAL_CREATED");

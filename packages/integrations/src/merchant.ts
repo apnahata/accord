@@ -17,7 +17,9 @@ export interface MerchantContract<Offer, Mutation, Event> {
   bookingEvent(offer: Offer, reference: string): Event;
 }
 
-export type MerchantRecord<O> = { offer: O; original: O; failNextBooking: boolean; booked: boolean };
+export type MerchantRecord<O> = { offer: O; original: O; failNextBooking: boolean; booked: boolean;
+  /** Changed from the demo console: a later provider re-quote must not silently undo it (RESTORE clears it). */
+  simulated?: boolean };
 export type MerchantReceipt = {
   mode: "SIMULATED"; status: "CONFIRMED"; bookingReference: string;
   offerId: string; offerVersion: string; idempotencyKey: string; confirmedAt: string;
@@ -58,7 +60,8 @@ export class Merchant<O, M, E> {
       if (this.contract.id(after) !== offerId || this.contract.version(after) === this.contract.version(before)) {
         throw new IntegrationError("MUTATION_MUST_ADVANCE_VERSION");
       }
-      await tx.putOffer(offerId, { ...record, offer: after, failNextBooking: changed.failNextBooking });
+      const simulated = (mutation as { type?: string }).type !== "RESTORE";
+      await tx.putOffer(offerId, { ...record, offer: after, failNextBooking: changed.failNextBooking, simulated });
       await tx.enqueue(randomUUID(), this.contract.event.parse(this.contract.mutationEvent(before, after, mutation)));
       return after;
     });

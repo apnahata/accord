@@ -63,6 +63,8 @@ export function Room() {
   const personal = useResource<PrivateProposalEnvelope>(room.data?.activeProposalId ? `/proposals/${segment(room.data.activeProposalId)}/me` : null, live.revision);
   const inbox = useResource<InboxDTO>(`${base}/me/inbox`, live.revision);
   const nudge = inbox.data?.messages.find(message => message.kind === 'NUDGE' && message.nudge?.status === 'OPEN');
+  // Accord's latest private word to this member (why an approval was cancelled, what changed), newest last.
+  const latest = [...(inbox.data?.messages ?? [])].reverse().find(message => message.kind === 'STALE_REASON' || message.kind === 'INFO');
   const refresh = () => { room.refresh(); inbox.refresh(); personal.refresh(); };
   return <div className="page step-room">
     {room.loading && !room.data && <Loading />}
@@ -72,6 +74,11 @@ export function Room() {
         <h1>{room.data.name}</h1>
         <p className="lead">{room.data.members.map(member => member.displayName).join(' · ')}</p>
       </header>
+      {latest && !nudge && <section className="step-card step-message" aria-live="polite">
+        <p className="step-from"><Sparkles size={14} />Accord · only you can see this</p>
+        <h2>{latest.title}</h2>
+        <p>{latest.body}</p>
+      </section>}
       <StepCard room={room.data} base={base} proposal={proposal.data} personal={personal.data} nudge={nudge} onChange={refresh} />
       <ErrorNotice error={proposal.error} retry={proposal.refresh} />
       <div className="step-extras">

@@ -303,6 +303,9 @@ export class Coordinator {
         this.state.notify(room, id, personal.length
           ? { kind: "STALE_REASON", proposalId: proposal.id, title: `${current.propertyName} no longer works for you`,
               body: `${personal.map(check => check.privateExplanation).join(" ")} Your earlier approval won’t be used, and Accord won’t ask the group to change anything for you. It is already looking for another option.` }
+          : current.totalCents !== proposal.snapshot.offer.totalCents
+          ? { kind: "STALE_REASON", proposalId: proposal.id, title: `${current.propertyName} changed price`,
+              body: `It went from ${money(proposal.snapshot.offer.totalCents)} to ${money(current.totalCents)} total, so your share goes from ${money(proposal.snapshot.contributionsCents[id] ?? 0)} to ${money(shares[id]!)}. That still fits your requirements. Your earlier approval was cancelled, so nothing is charged at the new price unless you approve it again.` }
           : { kind: "STALE_REASON", proposalId: proposal.id, title: `Your approval for Proposal v${proposal.version} was cancelled`,
               body: "Something about the offer or the group changed, so Accord cancelled every approval. Nothing was booked and no share was used. Accord is looking for a new option." });
       }

@@ -166,5 +166,6 @@
 .step-card .boundary-list{margin:8px 0 4px}
 .step-card .heard{margin:14px 0 0;font-size:18px;line-height:1.55;color:var(--ink);letter-spacing:-.02em}
 .step-card .boundary-list>div{padding:12px 0}
+.step-message{margin-bottom:16px;border-color:#e3cf9f;background:#fbf6ea}
 .step-extras{margin-top:22px;display:flex;flex-direction:column;gap:14px}
 @media(max-width:640px){.step-room{padding-left:20px;padding-right:20px}.step-action{flex-direction:column}}
