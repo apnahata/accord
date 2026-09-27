@@ -7,7 +7,8 @@ import { ChartEmpty, FunnelBars, LineChart } from './charts';
 import type { PulseDTO } from './contracts';
 
 const bytes = (value: number) => value >= 1e6 ? `${(value / 1e6).toFixed(1)} MB` : value >= 1e3 ? `${Math.round(value / 1e3)} kB` : `${value} B`;
-const title = (value: string) => value.replace(/\b\w/g, c => c.toUpperCase());
+// "miami, fl" → "Miami, FL": words capitalized, a trailing state code upper-cased.
+const title = (value: string) => value.replace(/\b\w/g, c => c.toUpperCase()).replace(/, (\w{2})$/, (_, state: string) => `, ${state.toUpperCase()}`);
 
 function Stat({ icon: Icon, label, value, note, tone }: { icon: typeof Activity; label: string; value: string; note?: string; tone?: 'warm' }) {
   return <section className="panel stat-tile"><span className="stat-label"><Icon size={15} />{label}</span><strong className="stat-value">{value}</strong>{note && (tone === 'warm' ? <Tag tone="warm">{note}</Tag> : <span className="stat-note">{note}</span>)}</section>;
@@ -19,6 +20,8 @@ export function Pulse() {
   useEffect(() => { const timer = setInterval(() => setTick(t => t + 1), 15_000); return () => clearInterval(timer); }, []);
   const resource = useResource<PulseDTO>('/pulse', tick);
   const data = resource.data;
+  // Tiny early chunks can grow when compressed; only claim savings once there are some.
+  const saved = data?.storage.ratio !== undefined && data.storage.ratio > 0;
   return <div className="page pulse-page">
     <PageHeading eyebrow="Powered by Tiger Data" title="The market, and the moment a group agrees." description="Every live price Accord sees and every step toward consensus, stored as time-series in Tiger Data. This is the same record that catches a merchant repricing after a group has already agreed. Public listing prices and anonymous events only: no names, budgets or requirements ever leave Accord." aside={<Tag>Refreshes every 15s</Tag>} />
     {resource.loading && !data && <Loading />}
@@ -26,8 +29,8 @@ export function Pulse() {
     {data && <>
       <div className="stat-grid">
         <Stat icon={Activity} label="Price observations" value={data.totals.observations.toLocaleString('en-US')} note={`${data.totals.listings.toLocaleString('en-US')} listings · ${data.totals.destinations} destinations`} />
-        <Stat icon={Database} label="Compression" value={data.storage.ratio !== undefined ? `${Math.round(data.storage.ratio * 100)}% smaller` : 'Pending'} tone={data.storage.ratio === undefined ? 'warm' : undefined}
-          note={data.storage.ratio !== undefined ? `${bytes(data.storage.beforeBytes)} → ${bytes(data.storage.afterBytes)} · ${data.storage.compressedChunks}/${data.storage.chunks} chunks` : `Expected for ~2 hours after the first chunk — Timescale compresses on a schedule, not on demand · ${bytes(data.storage.totalBytes)} stored so far`} />
+        <Stat icon={Database} label="Compression" value={saved ? `${Math.round(data.storage.ratio! * 100)}% smaller` : 'Warming up'} tone={saved ? undefined : 'warm'}
+          note={saved ? `${bytes(data.storage.beforeBytes)} → ${bytes(data.storage.afterBytes)} · ${data.storage.compressedChunks}/${data.storage.chunks} chunks` : `Expected for ~2 hours after the first chunk — Timescale compresses on a schedule, not on demand · ${bytes(data.storage.totalBytes)} stored so far`} />
         <Stat icon={Timer} label="Stale detection" value={data.consensus.medianStaleDetectionMs !== undefined ? `${Math.round(data.consensus.medianStaleDetectionMs)} ms` : '—'} note="Median time from a live price check to voiding stale approvals" />
         <Stat icon={Gauge} label="Dashboard query" value={`${data.queryMs} ms`} note="All four panels above, one round of Tiger queries" />
       </div>
