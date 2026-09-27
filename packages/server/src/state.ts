@@ -150,7 +150,12 @@ export class AccordState {
     this.autopilot = new Coordinator(this, autopilot);
     this.store = persistence ? persistence.merchantStore as MerchantBackend : new MemoryMerchantStore<Offer, MerchantEvent>();
     const merchant = this.merchant = new Merchant(this.store, merchantContract);
-    this.ready = (async () => { if (persistence) await this.#hydrate(); await merchant.seed(demoCatalog()); await this.#migrateStoredOffers(); })();
+    this.ready = (async () => {
+      if (persistence) await this.#hydrate();
+      await merchant.seed(demoCatalog());
+      await this.#migrateStoredOffers();
+      for (const room of this.rooms.values()) if (room.planning?.stage === "PLANNING") this.autopilot.resume(room);
+    })();
     this.streams = new RoomStreams(PublicEventSchema, PrivateEventSchema, async (request, roomId) => {
       const session = this.sessionFromCookie(request.headers.cookie);
       if (!session) return null;

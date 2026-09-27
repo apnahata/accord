@@ -94,28 +94,22 @@ function PlanningResults({ planning }: { planning: Planning }) {
 export function TripAnswerFields({ values, horizon }: { values?: Constraints; horizon: Planning['horizon'] }) {
   const [ranges, setRanges] = useState<Array<Partial<Availability>>>(values?.availability?.length ? values.availability : [{}]);
   return <>
-    <hr />
-    <div className="section-heading"><h2>Your trip wishes</h2><Compass size={20} /></div>
-    <p className="subtle">Accord works out when and where from everyone’s answers. Only anonymous totals are ever shown to the group.</p>
-    <label>When could you go? <span>Required</span></label>
+    <label>When can you go?</label>
     {ranges.map((range, index) => <div className="trip-fields availability-row" key={index}>
       <div><label htmlFor={`from-${index}`} className="sr-only">Earliest day you could leave</label><input id={`from-${index}`} name={`from-${index}`} type="date" required={index === 0} min={horizon.earliest} max={horizon.latest} defaultValue={range.from} aria-label="Earliest day you could leave" /></div>
       <div><label htmlFor={`to-${index}`} className="sr-only">Latest day you could be back</label><input id={`to-${index}`} name={`to-${index}`} type="date" required={index === 0} min={horizon.earliest} max={horizon.latest} defaultValue={range.to} aria-label="Latest day you could be back" /></div>
     </div>)}
-    {ranges.length < 3 && <button type="button" className="text-button" onClick={() => setRanges([...ranges, {}])}>Add another stretch of dates</button>}
-    <p className="field-help">From the earliest day you could leave to the latest day you could be back, within the next six months.</p>
+    {ranges.length < 3 && <button type="button" className="text-button" onClick={() => setRanges([...ranges, {}])}>Add more dates</button>}
     <div className="trip-fields">
-      <div><label htmlFor="nights">How many nights? <span>Optional</span></label><input id="nights" name="nights" type="number" min={1} max={14} placeholder="3" defaultValue={values?.nights ?? ''} /></div>
-      <div><label htmlFor="leaving-from">Leaving from <span>Optional</span></label><input id="leaving-from" name="leavingFrom" maxLength={120} placeholder="Boston" defaultValue={values?.leavingFrom || ''} /></div>
+      <div><label htmlFor="nights">Nights</label><input id="nights" name="nights" type="number" min={1} max={14} placeholder="3" defaultValue={values?.nights ?? ''} /></div>
+      <div><label htmlFor="leaving-from">Leaving from</label><input id="leaving-from" name="leavingFrom" maxLength={120} placeholder="Boston" defaultValue={values?.leavingFrom || ''} /></div>
     </div>
-    <p className="field-help">Accord goes with the trip length most people want, and looks for places that are a reasonable trip from where everyone is.</p>
-    <label>What kind of trip would you love? <span>Pick any</span></label>
+    <label>What kind of trip?</label>
     <div className="chip-row style-picker">{styles.map(style => <label key={style} className="chip-toggle"><input type="checkbox" name="style" value={style} defaultChecked={values?.tripStyles?.includes(style)} /><span>{styleLabels[style]}</span></label>)}</div>
-    <label htmlFor="place-ideas">Anywhere you’d love to go? <span>Optional</span></label>
-    <input id="place-ideas" name="placeIdeas" maxLength={300} placeholder="Somewhere warm, Charleston, a lake town…" defaultValue={values?.placeIdeas || ''} />
-    <label htmlFor="places-avoid">Anywhere you’d rather not go? <span>Optional</span></label>
-    <input id="places-avoid" name="placesToAvoid" maxLength={300} placeholder="Not Florida again…" defaultValue={values?.placesToAvoid || ''} />
-    <p className="field-help">Accord never suggests a place someone ruled out, and never says who ruled it out.</p>
+    <label htmlFor="place-ideas">A place you’d love</label>
+    <input id="place-ideas" name="placeIdeas" maxLength={300} placeholder="A lake town" defaultValue={values?.placeIdeas || ''} />
+    <label htmlFor="places-avoid">A place to skip</label>
+    <input id="places-avoid" name="placesToAvoid" maxLength={300} placeholder="Not Florida" defaultValue={values?.placesToAvoid || ''} />
   </>;
 }
 export function readTripAnswers(data: FormData): Partial<Constraints> {
