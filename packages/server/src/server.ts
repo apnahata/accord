@@ -302,7 +302,8 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         const displayName = account?.displayName ?? ("displayName" in input && typeof input.displayName === "string" ? input.displayName : undefined);
         if (!displayName) throw new AppError(401, "ACCOUNT_REQUIRED");
         const result = state.createRoom(input.name, goal, displayName, input.trip, session,
-          input.plan ? { plan: input.plan, rehearsal: input.rehearsal === true || !(liteApiKey || serpApiKey) } : undefined);
+          input.plan ? { plan: input.plan, rehearsal: input.rehearsal === true || !(liteApiKey || serpApiKey) } : undefined,
+          input.trip ? (input.rehearsal === true || !(liteApiKey || serpApiKey)) : undefined);
         response.setHeader("set-cookie", sessionCookie(result.sessionToken, request));
         await send(201, { roomId: result.roomId, inviteToken: result.inviteToken, ...(inviteUrl(result.inviteToken) ? { inviteUrl: inviteUrl(result.inviteToken) } : {}) }); return;
       }
@@ -406,7 +407,14 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         if (route === "receipt" && method === "GET") { await send(200, state.receipt(room)); return; }
         if (route === "demo/merchant" && method === "GET") {
           state.requireHost(roomId, session);
-          await send(200, { offers: (await state.allOffers(state.offerIdsFor(room))).map(offer => ({ offerId: offer.offerId, propertyName: offer.propertyName, offerVersion: offer.offerVersion, totalCents: offer.totalCents, cancellationLabel: offer.cancellationPolicyCode, available: offer.available })) }); return;
+          const proposal = room.activeProposalId ? state.proposals.get(room.activeProposalId) : undefined;
+          const activeOfferId = proposal && (proposal.state === "OPEN" || proposal.state === "READY_TO_EXECUTE") ? proposal.snapshot.offer.offerId : undefined;
+          const ballotOfferIds = room.planning?.stage === "VOTING" ? room.planning.options.map(option => option.offerId) : [];
+          const offers = (await state.allOffers(state.offerIdsFor(room))).map(offer => ({ offerId: offer.offerId, propertyName: offer.propertyName, offerVersion: offer.offerVersion, totalCents: offer.totalCents, cancellationLabel: offer.cancellationPolicyCode, available: offer.available }));
+          // The stays the group is actually deciding on go first; changing any other stay can't affect them.
+          const rank = (id: string) => id === activeOfferId ? 2 : ballotOfferIds.includes(id) ? 1 : 0;
+          offers.sort((a, b) => rank(b.offerId) - rank(a.offerId));
+          await send(200, { offers, ...(activeOfferId ? { activeOfferId } : {}), ...(ballotOfferIds.length ? { ballotOfferIds } : {}) }); return;
         }
         if (route === "merchant/events" && method === "POST") {
           state.requireHost(roomId, session);

@@ -243,7 +243,9 @@ export function Merchant() {
   const [confirmReset, setConfirmReset] = useState(false);
   const [lastAction, setLastAction] = useState('');
   const analytics = useResource<AnalyticsDTO>(resource.data ? '/demo/analytics' : null);
-  const offer = resource.data?.offers.find(item => item.offerId === selected) || resource.data?.offers[0];
+  const active = resource.data?.activeOfferId;
+  const ballot = resource.data?.ballotOfferIds ?? [];
+  const offer = resource.data?.offers.find(item => item.offerId === (selected || active || ballot[0])) || resource.data?.offers[0];
   return <div className="page">
     {roomId && <Link to={roomBase} className="back-link"><ArrowLeft size={15} />Back to your group</Link>}
     <PageHeading eyebrow="Authenticated demo administration" title="Simulate a provider change." description="Real prices change on their own; these controls simulate that on stage by changing Accord’s stored copy of an offer. They never change the provider’s real listing. Host only." />
@@ -251,8 +253,11 @@ export function Merchant() {
     {resource.loading && <Loading />}<ErrorNotice error={resource.error} retry={resource.refresh} />
     {resource.data && <div className="room-grid"><section className="panel form-panel">
       <label htmlFor="merchant-offer">Current merchant offer</label>
-      <select id="merchant-offer" value={offer?.offerId || ''} onChange={event => setSelected(event.target.value)}>{resource.data.offers.map(item => <option key={item.offerId} value={item.offerId}>{item.propertyName}</option>)}</select>
-      {offer && <><h2>{offer.propertyName}</h2><p>Current offer version: <strong>{offer.offerVersion}</strong></p><p>{money(offer.totalCents)} · {offer.cancellationLabel} · {offer.available ? 'Available' : 'Unavailable'}</p><div className="mutation-grid">{mutations.map(([mutation, label]) => <Button className="secondary" key={mutation.type} disabled={action.busy || resource.loading} onClick={() => action.run(async () => {
+      <select id="merchant-offer" value={offer?.offerId || ''} onChange={event => setSelected(event.target.value)}>{resource.data.offers.map(item => <option key={item.offerId} value={item.offerId}>{item.offerId === active ? `★ ${item.propertyName} (your group's proposal)` : ballot.includes(item.offerId) ? `☆ ${item.propertyName} (on your group's ballot)` : item.propertyName}</option>)}</select>
+      {!active && !ballot.length && <p className="fine">No open proposal or vote right now, so changing a stay here won't affect the group.</p>}
+      {offer && <>{offer.offerId === active ? <Tag tone="warm">Your group's current proposal — changing this cancels everyone's approval</Tag>
+        : ballot.includes(offer.offerId) ? <Tag tone="warm">On your group's ballot — changing this re-checks the vote</Tag>
+        : (active || ballot.length > 0) && <p className="fine">This stay isn't in front of the group, so changing it won't affect them.</p>}<h2>{offer.propertyName}</h2><p>Current offer version: <strong>{offer.offerVersion}</strong></p><p>{money(offer.totalCents)} · {offer.cancellationLabel} · {offer.available ? 'Available' : 'Unavailable'}</p><div className="mutation-grid">{mutations.map(([mutation, label]) => <Button className="secondary" key={mutation.type} disabled={action.busy || resource.loading} onClick={() => action.run(async () => {
         await post(roomId ? `${roomBase}/merchant/events` : '/merchant/events', { offerId: offer.offerId, expectedOfferVersion: offer.offerVersion, mutation: mutation.type === 'INCREASE_PRICE' ? { ...mutation, newTotalCents: Math.round(offer.totalCents * 1.2) } : mutation });
         setLastAction(`${label} — a new offer version was recorded. Any active proposal for the old version is now stale and cannot execute.`); resource.refresh(); analytics.refresh();
       })}>{label}<ArrowRight size={15} /></Button>)}</div></>}

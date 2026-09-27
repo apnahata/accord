@@ -179,6 +179,40 @@ export class Planner {
     return cast === room.memberIds.length;
   }
 
+  /**
+   * A stay on the ballot changed while the group is voting. Re-check that destination against everyone's
+   * requirements right away: update its price, or take it off the ballot if it no longer works for everyone.
+   */
+  async refreshBallot(room: Room, offerId: string) {
+    const planning = room.planning;
+    if (!planning || planning.stage !== "VOTING") return;
+    const option = planning.options.find(item => item.offerIds.includes(offerId));
+    const members = this.state.readyMembers(room);
+    if (!option || !members) return;
+    const best = (await this.state.rankFeasible(await this.state.allOffers(option.offerIds), members))[0];
+    if (room.planning !== planning || planning.stage !== "VOTING") return;
+    const share = (cents: number) => (Math.ceil(cents / room.memberIds.length) / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+    if (best) {
+      const before = option.totalCents;
+      const idea = planning.destinations.find(item => item.name === option.destination);
+      Object.assign(option, { offerId: best.offerId, propertyName: best.propertyName, totalCents: best.totalCents,
+        ...(idea ? this.#why(idea, option, members, best.cancellationPolicyCode) : {}) });
+      if (best.totalCents !== before) this.state.emit(room, "PLAN_OPTION_UPDATED",
+        `${option.destination} changed price: now ${share(best.totalCents)} per person (was ${share(before)}). The ballot is updated.`, undefined,
+        { ...ACCORD, detail: "Accord re-checked this destination against everyone’s confirmed requirements. It still works for everyone." });
+      this.state.touch(room);
+      return;
+    }
+    planning.options = planning.options.filter(item => item !== option);
+    for (const [memberId, vote] of Object.entries(planning.votes)) if (vote === option.id) delete planning.votes[memberId];
+    this.state.emit(room, "PLAN_OPTION_REMOVED", `${option.destination} changed and no longer works for everyone, so Accord took it off the ballot.`, undefined,
+      { ...ACCORD, detail: "Anyone who picked it can vote again. No one’s requirements or votes are shown to the group." });
+    if (!planning.options.length) this.#settle(room, planning, "NO_OPTION", "No trip on the ballot works for everyone anymore. Accord will keep planning.");
+    else if (planning.options.length === 1) await this.#decide(room, planning, planning.options[0]!, "ONLY_OPTION");
+    else if (Object.keys(planning.votes).length === room.memberIds.length) await this.closeVote(room, "VOTE");
+    this.state.touch(room);
+  }
+
   async closeVote(room: Room, by: "VOTE" | "DEADLINE") {
     const planning = room.planning;
     if (!planning || planning.stage !== "VOTING") return;
@@ -301,43 +335,51 @@ export class Planner {
     const answers = (pick: (constraints: Constraints) => string | undefined) => members.map(member => pick(member.constraints)?.trim()).filter((text): text is string => !!text).sort();
     const ideas = answers(item => item.placeIdeas), avoid = answers(item => item.placesToAvoid), from = answers(item => item.leavingFrom);
     const ruledOut = (name: string) => avoid.some(text => mentions(text, name)) || from.some(text => isHome(text, name));
+    // Specific places people asked for (not vague wishes, not ruled out by anyone else).
+    const named = [...new Map(ideas.filter(idea => looksLikeAPlace(idea) && !ruledOut(idea)).map(idea => [idea.toLowerCase(), idea])).values()];
+    // When people named places, the ballot is exactly those places: every one is represented, and nothing
+    // nobody asked for is added. The group then settles it by private vote. With no named places, Accord picks.
+    const honor = <T extends { name: string }>(candidates: T[], make: (idea: string) => T) => {
+      if (!named.length) return candidates.slice(0, MAX_DESTINATIONS);
+      const asked = candidates.filter(item => named.some(idea => alreadyCovers(idea, item.name)));
+      const missed = named.filter(idea => !asked.some(item => alreadyCovers(idea, item.name)));
+      return [...asked, ...missed.map(make)];
+    };
     const suggest = this.state.providers.suggestDestinations;
     if (suggest) {
       const input: DestinationsInput = { from, countryCode: room.plan!.countryCode, nights: daysBetween(windows[0]!.checkIn, windows[0]!.checkOut),
         guests: members.length, windows, styleCounts, ideas, avoid };
       const suggested = (await suggest(input).catch(() => undefined) ?? [])
         .map(idea => ({ name: idea.name.trim(), timeZone: validZone(idea.timeZone) ? idea.timeZone : "America/New_York", why: idea.why.trim().slice(0, 160), styles: idea.styles }))
-        .filter((idea, index, all) => idea.name.length >= 2 && !ruledOut(idea.name) && all.findIndex(other => other.name.toLowerCase() === idea.name.toLowerCase()) === index)
-        .slice(0, MAX_DESTINATIONS);
-      // The model can silently drop a specific place someone asked for; never let its judgment override an
-      // explicit request. Anything it left out (and no one else ruled out) is added back as its own real
-      // candidate, using the member's own words, so it gets an actual search and a real vote.
-      const missed = ideas.filter(idea => looksLikeAPlace(idea) && !ruledOut(idea) && !suggested.some(item => alreadyCovers(idea, item.name)));
-      const forced = missed.map(idea => ({ name: idea, timeZone: "America/New_York", why: "Someone in the group asked to go here.", styles: [] as TripStyle[] }));
-      if (suggested.length || forced.length) return { ideas: [...suggested, ...forced], source: "AI" as const };
+        .filter((idea, index, all) => idea.name.length >= 2 && !ruledOut(idea.name) && all.findIndex(other => other.name.toLowerCase() === idea.name.toLowerCase()) === index);
+      // The model can drop or substitute a place someone asked for; its judgment never overrides an explicit request.
+      const chosen = honor(suggested, idea => ({ name: idea, timeZone: "America/New_York", why: "Someone in the group asked to go here.", styles: [] as TripStyle[] }));
+      if (chosen.length) return { ideas: chosen, source: "AI" as const };
     }
     const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
-    const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, MAX_DESTINATIONS);
-    return { source: "ACCORD" as const, ideas: ranked.map(item => {
+    const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, Math.max(MAX_DESTINATIONS, named.length)).map(item => {
       const matched = item.styles.filter(style => styleCounts[style]);
       return { name: item.name, timeZone: item.timeZone, styles: item.styles,
         why: matched.length ? `Known for ${list(matched.map(style => styleLabel[style]))}.` : ideas.some(text => mentions(text, item.name)) ? "Someone suggested it." : "A popular group trip." };
-    }) };
+    });
+    return { source: "ACCORD" as const, ideas: honor(ranked, idea => ({ name: idea, timeZone: "America/New_York", styles: [] as TripStyle[], why: "Someone in the group asked to go here." })) };
   }
 
   /** Public-safe reasons: anonymous totals and facts about the stay, never an individual's answer. */
   #why({ name: destination, styles }: DestinationIdea, window: DateWindow, members: Ready, cancellation: string) {
     const fans = members.filter(member => member.constraints.tripStyles?.some(style => styles.includes(style)));
     const picked = [...new Set(fans.flatMap(member => member.constraints.tripStyles ?? []).filter(style => styles.includes(style)))];
-    const suggested = members.some(member => mentions(member.constraints.placeIdeas, destination));
+    // An anonymous count, like the style totals: how many people asked for this place, never who.
+    const askers = members.filter(member => member.constraints.placeIdeas && alreadyCovers(member.constraints.placeIdeas, destination)).length;
     const why = [
+      ...(askers ? [`${askers} of ${members.length} ${members.length === 1 ? "person" : "people"} asked to go here.`] : []),
       ...(fans.length ? [`Fits the ${list(picked.map(style => styleLabel[style]))} ${picked.length === 1 ? "pick" : "picks"} of ${fans.length} of ${members.length} people.`] : []),
-      ...(suggested ? ["Someone in the group suggested it."] : []),
       `Everyone is free ${dayRange(window)}.`,
       "The stay meets every confirmed requirement.",
       ...(cancellation === "FULL_CASH_REFUND" ? ["Fully refundable."] : []),
     ];
-    return { why, fit: fans.length + (suggested ? 1 : 0) };
+    // A place people explicitly asked for outweighs a style match, so the most-requested place leads the ballot and wins ties.
+    return { why, fit: fans.length + 2 * askers };
   }
 }
 

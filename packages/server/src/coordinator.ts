@@ -317,7 +317,11 @@ export class Coordinator {
   }
 
   /** A merchant change can make a previously impossible trip possible again. */
-  onOfferChanged(room: Room) {
+  onOfferChanged(room: Room, offerId?: string) {
+    if (offerId && room.planning?.stage === "VOTING") {
+      void this.#lock(room.id, () => this.planner.refreshBallot(room, offerId)).then(() => this.state.flush()).catch(() => undefined);
+      return;
+    }
     if (this.planner.needsPlanning(room) && room.planning?.stage === "NO_OPTION") { delete room.planning; this.kick(room, "READY"); }
     else if (room.noOption) this.kick(room, "REPLAN");
   }

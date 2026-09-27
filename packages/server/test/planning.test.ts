@@ -130,6 +130,43 @@ test("when no dates work for everyone, Accord privately asks only the one member
   assert.deepEqual(capsule.availability, [{ from: day(50), to: day(60) }, { from: day(37), to: day(40) }]);
 });
 
+test("a merchant change to a stay on the ballot re-checks the vote: prices update, and a destination that stops working is removed", async t => {
+  const call = await start(t);
+  const { roomId, cookies } = await plannedGroup(call, { Alex: { tripStyles: ["CITY"] }, Priya: { tripStyles: ["CITY"] }, Jordan: { tripStyles: ["CITY"] } });
+  const room = async () => (await call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data;
+  const voting = await waitFor(async () => { const data = await room(); return data.planning?.stage === "VOTING" && data; }, "the ballot");
+  assert.ok(voting.planning.options.length >= 2);
+  const console_ = async () => (await call(`/rooms/${roomId}/demo/merchant`, "GET", undefined, cookies.Alex)).data;
+  const change = async (offerId: string, mutation: unknown) => {
+    const offer = (await console_()).offers.find((item: any) => item.offerId === offerId);
+    assert.equal((await call(`/rooms/${roomId}/merchant/events`, "POST", { offerId, expectedOfferVersion: offer.offerVersion, mutation }, cookies.Alex)).status, 200);
+  };
+
+  // The console shows the ballot's stays first, so the demo changes what the group is actually deciding on.
+  const first = await console_();
+  assert.deepEqual(first.offers.slice(0, first.ballotOfferIds.length).map((item: any) => item.offerId).sort(), [...first.ballotOfferIds].sort());
+
+  const [a, b] = voting.planning.options;
+  const aOffer = first.ballotOfferIds[0], aTotal = first.offers.find((item: any) => item.offerId === aOffer).totalCents;
+  await change(aOffer, { type: "INCREASE_PRICE", newTotalCents: Math.round(aTotal * 1.2) });
+  await waitFor(async () => (await room()).planning.options.find((item: any) => item.id === a.id)?.equalShareCents !== a.equalShareCents, "the ballot price to update");
+
+  // Sell out the second destination's stays one by one; once none works, it leaves the ballot.
+  for (let i = 0; i < 4; i++) {
+    const current = await room();
+    const index = current.planning.options.findIndex((item: any) => item.id === b.id);
+    if (index < 0) break;
+    const offerId = (await console_()).ballotOfferIds[index];
+    await change(offerId, { type: "SELL_OUT" });
+    await waitFor(async () => { const next = await room(); const option = next.planning.options.findIndex((item: any) => item.id === b.id); return option < 0 || (await console_()).ballotOfferIds[option] !== offerId; }, "the ballot to re-check");
+  }
+  const after = await room();
+  assert.ok(!after.planning.options.some((item: any) => item.id === b.id), "a destination with no workable stay must leave the ballot");
+  const events = (await call(`/rooms/${roomId}/events`, "GET", undefined, cookies.Alex)).data.events.map((event: any) => event.title);
+  assert.ok(events.some((title: string) => title.includes("changed price")));
+  assert.ok(events.some((title: string) => title.includes("took it off the ballot")));
+});
+
 test("when two members could each unblock the dates, one yes retires the other's question", async t => {
   const call = await start(t);
   const { roomId, cookies } = await plannedGroup(call, {
@@ -299,7 +336,7 @@ test("an explicit destination wish the model drops is added back as a real candi
   assert.ok(reno, "the model's own list left it out, but it must still become a real option");
   assert.ok(view.options.some(option => option.destination === "Reno, NV"), "it must actually be searched, not just listed");
   assert.ok(!reno!.why.toLowerCase().includes("alex"), "the reason must never say whose idea it was");
-  assert.equal(view.destinations.length, 3, "the model's two picks are kept alongside the restored one");
+  assert.deepEqual(view.destinations.map(item => item.name), ["Reno, NV"], "once someone names a place, places nobody asked for stay off the ballot");
 });
 
 test("a resolved abbreviation or state already on the model's list is recognized, not duplicated", async () => {
@@ -312,6 +349,25 @@ test("a resolved abbreviation or state already on the model's list is recognized
   await state.autopilot.planNow(room);
   const names = state.roomDTO(room, alex.id).planning!.destinations.map(item => item.name);
   assert.deepEqual(names, ["Los Angeles, CA", "Columbus, OH"], "the model already resolved both ideas to real cities; nothing duplicate should be forced in");
+});
+
+test("two people asking for Florida and one for LA puts exactly those on the ballot, and the ballot says how many asked", async () => {
+  const { state, room, alex, priya } = plannedState(async () => [
+    { name: "Miami, FL", timeZone: "America/New_York", styles: ["BEACH"], why: "Beach." },
+    { name: "Los Angeles, CA", timeZone: "America/Los_Angeles", styles: ["CITY"], why: "City." },
+    { name: "San Diego, CA", timeZone: "America/Los_Angeles", styles: ["BEACH"], why: "Filler nobody asked for." },
+  ]);
+  state.join(room.inviteToken, "Jordan");
+  const jordan = state.members.get(room.memberIds.at(-1)!)!;
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, placeIdeas: "Florida" }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, placeIdeas: "Florida" }));
+  state.confirmConstraints(room, jordan, ConstraintsSchema.parse({ ...base, placeIdeas: "LA" }));
+  await state.autopilot.planNow(room);
+  const view = state.roomDTO(room, alex.id).planning!;
+  assert.deepEqual(view.destinations.map(item => item.name).sort(), ["Los Angeles, CA", "Miami, FL"], "San Diego was never asked for");
+  assert.equal(view.options[0]!.destination, "Miami, FL", "the place more people asked for leads the ballot and wins a tie");
+  assert.ok(view.options[0]!.why.includes("2 of 3 people asked to go here."));
+  assert.ok(view.options.find(option => option.destination === "Los Angeles, CA")!.why.includes("1 of 3 people asked to go here."));
 });
 
 test("rehearsal stays are deterministic and cover the trip exactly", async () => {

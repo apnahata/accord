@@ -218,11 +218,11 @@ export class AccordState {
     this.#addSession(hashToken(sessionToken), user.id, membership?.roomId, membership?.id);
     return { sessionToken, account: this.accountDTO(this.sessions.get(hashToken(sessionToken))!) };
   }
-  createRoom(name: string, goal: string, displayName: string, trip?: Trip, existing?: SessionRecord, planning?: { plan: TripPlan; rehearsal: boolean }) {
+  createRoom(name: string, goal: string, displayName: string, trip?: Trip, existing?: SessionRecord, planning?: { plan: TripPlan; rehearsal: boolean }, tripRehearsal?: boolean) {
     const roomId = randomUUID(), memberId = randomUUID(), inviteToken = token(), sessionToken = token();
     const userId = existing?.userId ?? randomUUID();
     if (!this.users.has(userId)) { this.users.set(userId, { id: userId, displayName, createdAt: nowIso() }); this.#dirtyUsers.add(userId); }
-    const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [], ...(trip ? { trip } : {}),
+    const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [], ...(trip ? { trip, ...(tripRehearsal ? { rehearsal: true } : {}) } : {}),
       ...(planning ? { plan: planning.plan, ...(planning.rehearsal ? { rehearsal: true } : {}) } : {}) };
     this.rooms.set(roomId, room); this.#addInvitation(hashToken(inviteToken), roomId);
     this.members.set(memberId, { id: memberId, userId, roomId, displayName, constraints: null, capsuleVersion: 0 });
@@ -720,7 +720,11 @@ export class AccordState {
     const members = this.confirmed(room);
     if (room.plan && !room.trip) throw new AppError(409, "TRIP_NOT_DECIDED");
     if (isLive(room) && options.search !== false) await this.searchLive(room);
-    else this.emit(room, "SOLVE_STARTED", isLive(room) ? "Accord started replanning from the current observed stays." : trigger === "REPLAN" ? "Accord is re-checking every demo stay against everyone’s confirmed requirements." : "Accord started checking current demo stays.", undefined, { actor: "ACCORD" });
+    else {
+      // A rehearsal trip has nothing to check until its generated stays exist; later solves reuse them so merchant changes stick.
+      if (room.trip && room.rehearsal && !room.search) await this.searchCandidates(room, [room.trip]);
+      this.emit(room, "SOLVE_STARTED", isLive(room) ? "Accord started replanning from the current observed stays." : trigger === "REPLAN" ? "Accord is re-checking every demo stay against everyone’s confirmed requirements." : "Accord started checking current demo stays.", undefined, { actor: "ACCORD" });
+    }
     const data = await this.offers(room);
     if (!data.recommendedOfferId) { this.emit(room, "SOLVE_COMPLETED", "No current stay satisfies every confirmed requirement.", undefined, { actor: "ACCORD", detail: `Checked ${data.offers.length} stays.` }); return { noSolution: true }; }
     const offer = (await this.currentOffer(data.recommendedOfferId))!;
@@ -1134,7 +1138,7 @@ export class AccordState {
           if (!this.offerIdsFor(room).includes(offerId) && this.proposals.get(room.activeProposalId ?? "")?.snapshot.offer.offerId !== offerId) continue;
           this.emit(room, "MERCHANT_OFFER_MUTATED", `The merchant changed ${after.propertyName}.`, room.activeProposalId, { actor: "MERCHANT" });
           if (room.activeProposalId && this.proposals.get(room.activeProposalId)?.snapshot.offer.offerId === offerId) this.stale(room, `The merchant changed ${after.propertyName}.`);
-          else this.autopilot.onOfferChanged(room);
+          else this.autopilot.onOfferChanged(room, offerId);
         }
       });
       return after;

@@ -153,6 +153,10 @@ export type AccountDTO = {
 };
 export type MerchantDTO = {
   offers: Array<{ offerId: string; propertyName: string; offerVersion: string; totalCents: number; cancellationLabel: string; available: boolean }>;
+  /** The offer in the group's current open proposal, if any. Changing it is what stales consent. */
+  activeOfferId?: string;
+  /** While the group is voting: the stay shown for each destination on the ballot. Changing one re-checks the ballot. */
+  ballotOfferIds?: string[];
 };
 export type AnalyticsDTO = {
   source: 'TIGER'; points: Array<{ at: string; totalCents: number; label: string }>;
