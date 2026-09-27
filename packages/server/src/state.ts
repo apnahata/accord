@@ -27,9 +27,11 @@ export { AppError };
 /** Private to one member; sealed at rest with their constraints. */
 export type InboxEntry = {
   id: string; at: string; kind: InboxMessageDTO["kind"]; title: string; body: string; proposalId?: string;
-  nudge?: { status: "OPEN" | "ACCEPTED" | "KEPT" | "EXPIRED"; check: NearMiss["check"]; offerId?: string; offerVersion?: string; shareCents: number; checkOutAt?: string;
+  nudge?: { status: "OPEN" | "ACCEPTED" | "KEPT" | "EXPIRED"; check: NearMiss["check"] | "PLACE"; offerId?: string; offerVersion?: string; shareCents: number; checkOutAt?: string;
     /** DATES nudges: the exact trip days the member is asked to make. */
-    window?: DateWindow };
+    window?: DateWindow;
+    /** PLACE nudges: the member's own placesToAvoid text at the moment they were asked, so accepting only clears what they were actually shown. */
+    place?: string };
 };
 export type Member = { id: string; userId: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number; inbox?: InboxEntry[];
   /** Backboard memory ids this member has explicitly re-confirmed for use in this trip. Ids only, never preference content. */
@@ -339,6 +341,7 @@ export class AccordState {
       if (nudge.check === "BUDGET") return { acceptLabel: `Raise my limit to ${money(nudge.shareCents)}`, keepLabel: "Keep my limit" };
       if (nudge.check === "REFUND") return { acceptLabel: "Drop the refund requirement for this trip", keepLabel: "Keep requiring a full refund" };
       if (nudge.check === "DATES") return { acceptLabel: nudge.window ? `I can make ${dayRange(nudge.window)}` : "I can make these dates", keepLabel: "Keep my dates" };
+      if (nudge.check === "PLACE") return { acceptLabel: "Drop that for this trip", keepLabel: "Keep avoiding it" };
       return { acceptLabel: "Accept this checkout time", keepLabel: "Keep my checkout time" };
     };
     // Calls to action about a proposal that is no longer open would point people at a dead offer.

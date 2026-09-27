@@ -109,7 +109,7 @@ export type InboxMessageDTO = {
   id: string; at: string;
   kind: 'STALE_REASON' | 'NUDGE' | 'REMINDER' | 'READY_TO_BOOK' | 'EXPIRING' | 'INFO' | 'VOTE';
   title: string; body: string; proposalId?: string;
-  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT' | 'DATES'; acceptLabel: string; keepLabel: string };
+  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT' | 'DATES' | 'PLACE'; acceptLabel: string; keepLabel: string };
 };
 export type InboxDTO = { messages: InboxMessageDTO[] };
 export type PublicChange = { label: string; before: string; after: string };

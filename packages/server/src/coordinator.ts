@@ -277,6 +277,8 @@ export class Coordinator {
     const next: Constraints = nudge.check === "BUDGET" ? { ...current, maxContributionCents: Math.max(current.maxContributionCents, nudge.shareCents) }
       : nudge.check === "REFUND" ? { ...current, requiresFullCashRefund: false }
       : nudge.check === "DATES" ? { ...current, availability: [...(current.availability ?? []), { from: nudge.window!.checkIn, to: nudge.window!.checkOut }].slice(-6) }
+      // Only clear what the member was actually asked about; if they've since changed their avoid list, leave it alone.
+      : nudge.check === "PLACE" ? (current.placesToAvoid?.trim() === nudge.place ? { ...current, placesToAvoid: undefined } : current)
       : { ...current, latestCheckOutAt: nudge.checkOutAt! };
     nudge.status = "ACCEPTED";
     this.state.confirmConstraints(room, member, ConstraintsSchema.parse(next));

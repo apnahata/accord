@@ -77,10 +77,13 @@ function VoteCard({ room, base, planning, onChange }: { room: Room; base: string
     <div className="step-options">{planning.options.map(option => {
       const chosen = planning.myVoteOptionId === option.id;
       return <article key={option.id} className={`trip-option ${chosen ? 'mine' : ''}`}>
+        <StayArt city={option.destination} />
         <h3>{option.destination}</h3>
         <p className="subtle">{dayRange(option.checkIn, option.checkOut)} · {option.nights} nights</p>
         <p className="subtle">{option.propertyName}</p>
+        {option.why.length > 0 && <ul className="why-list">{option.why.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
         <p className="step-price"><strong>{money(option.equalShareCents)}</strong> per person</p>
+        {option.votes !== undefined && <p className="subtle">{option.votes} {option.votes === 1 ? 'vote' : 'votes'}</p>}
         {chosen ? <p className="my-vote"><Check size={15} />Your vote</p> : <Button className={planning.myVoteOptionId ? 'secondary' : ''} disabled={action.busy} onClick={() => vote(option.id)}>{planning.myVoteOptionId ? 'Switch to this' : 'Choose this trip'}</Button>}
       </article>;
     })}</div>

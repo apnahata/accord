@@ -97,10 +97,7 @@ export class Planner {
 
     const { ideas, source } = await this.#destinations(room, members, windows);
     planning.destinations = ideas;
-    if (!ideas.length) {
-      this.#settle(room, planning, "NO_OPTION", "Every destination Accord considered was ruled out by someone. Members can revisit the places they’d rather avoid.");
-      return;
-    }
+    if (!ideas.length) { await this.#noDestinations(room, planning, members, windows); return; }
     this.state.emit(room, "PLAN_DESTINATIONS", `Accord is considering ${list(ideas.map(idea => idea.name))}.`, undefined,
       { ...ACCORD, detail: source === "AI"
         ? "Suggested by Gemini from anonymous totals of the trip styles people picked. Budgets and names were not shared."
@@ -245,6 +242,35 @@ export class Planner {
     this.#settle(room, planning, "NO_OPTION", waiting
       ? "No dates work for everyone yet. Accord has privately checked in with some members."
       : "No dates work for everyone. Members can update when they’re free.");
+  }
+
+  /** Every catalog/AI destination was ruled out by someone's avoid list. Privately ask whoever alone blocks a workable trip. */
+  async #noDestinations(room: Room, planning: Planning, members: Ready, windows: DateWindow[]) {
+    const styleCounts: Partial<Record<TripStyle, number>> = {};
+    for (const member of members) for (const style of member.constraints.tripStyles ?? []) styleCounts[style] = (styleCounts[style] ?? 0) + 1;
+    const ideas = members.map(member => member.constraints.placeIdeas?.trim()).filter((text): text is string => !!text).sort();
+    const from = members.map(member => member.constraints.leavingFrom?.trim()).filter((text): text is string => !!text).sort();
+    const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
+    const blockers = members.filter(member => member.constraints.placesToAvoid?.trim());
+    let waiting = false;
+    for (const member of blockers) {
+      const place = member.constraints.placesToAvoid!.trim();
+      const avoidWithoutMe = blockers.filter(other => other.id !== member.id).map(other => other.constraints.placesToAvoid!.trim());
+      // If a good trip still doesn't emerge even without this member's avoid list, they aren't the (sole) blocker; don't ask them.
+      const unlocked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid: avoidWithoutMe, from, months }, 1);
+      if (!unlocked.length) continue;
+      const inbox = member.inbox ?? [];
+      if (inbox.some(entry => entry.nudge?.status === "OPEN")) { waiting = true; continue; }
+      if (inbox.filter(entry => entry.kind === "NUDGE").length >= this.hooks.maxNudgesPerMember) continue;
+      if (inbox.some(entry => entry.nudge?.status === "KEPT" && entry.nudge.check === "PLACE" && entry.nudge.place === place)) continue;
+      this.state.notify(room, member.id, { kind: "NUDGE", title: "One trip works for everyone but you",
+        body: `${unlocked[0]!.name} could work for everyone else, but you said to avoid it. You can drop that for this trip, or keep it. No one else will see what you choose.`,
+        nudge: { status: "OPEN", check: "PLACE", shareCents: 0, place } });
+      waiting = true;
+    }
+    this.#settle(room, planning, "NO_OPTION", waiting
+      ? "No destination works for everyone yet. Accord has privately checked in with some members."
+      : "Every destination Accord considered was ruled out by someone. Members can revisit the places they’d rather avoid.");
   }
 
   async #destinations(room: Room, members: Ready, windows: DateWindow[]) {
