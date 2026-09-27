@@ -102,7 +102,10 @@ const hashToken = (token: string) => createHash("sha256").update(token).digest("
 const token = () => randomBytes(32).toString("base64url");
 const nowIso = () => new Date().toISOString();
 function compatibleOffer(value: Offer | Record<string, unknown>): Offer {
-  const input = value as Offer & { checkInDate?: string; checkOutDate?: string; checkInTimeKnown?: boolean; checkOutTimeKnown?: boolean };
+  const input = { ...(value as Offer & { checkInDate?: string; checkOutDate?: string; checkInTimeKnown?: boolean; checkOutTimeKnown?: boolean }) };
+  // Mongo stores a missing optional field as null. Null is not "absent" to the schema, so a hotel
+  // with no rating used to crash planning after the search had already succeeded.
+  for (const [key, item] of Object.entries(input)) if (item === null && key !== "stepFreeVerified") delete input[key as keyof typeof input];
   return OfferSchema.parse({ ...input,
     checkInDate: input.checkInDate ?? String(input.checkInAt).slice(0, 10),
     checkOutDate: input.checkOutDate ?? String(input.checkOutAt).slice(0, 10),
@@ -146,7 +149,12 @@ export class AccordState {
     this.autopilot = new Coordinator(this, autopilot);
     this.store = persistence ? persistence.merchantStore as MerchantBackend : new MemoryMerchantStore<Offer, MerchantEvent>();
     const merchant = this.merchant = new Merchant(this.store, merchantContract);
-    this.ready = (async () => { if (persistence) await this.#hydrate(); await merchant.seed(demoCatalog()); await this.#migrateStoredOffers(); })();
+    this.ready = (async () => {
+      if (persistence) await this.#hydrate();
+      await merchant.seed(demoCatalog());
+      await this.#migrateStoredOffers();
+      for (const room of this.rooms.values()) if (room.planning?.stage === "PLANNING") this.autopilot.resume(room);
+    })();
     this.streams = new RoomStreams(PublicEventSchema, PrivateEventSchema, async (request, roomId) => {
       const session = this.sessionFromCookie(request.headers.cookie);
       if (!session) return null;
