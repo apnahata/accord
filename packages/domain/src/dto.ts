@@ -109,7 +109,7 @@ export type InboxMessageDTO = {
   id: string; at: string;
   kind: 'STALE_REASON' | 'NUDGE' | 'REMINDER' | 'READY_TO_BOOK' | 'EXPIRING' | 'INFO' | 'VOTE';
   title: string; body: string; proposalId?: string;
-  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT' | 'DATES'; acceptLabel: string; keepLabel: string };
+  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT' | 'DATES' | 'PLACE'; acceptLabel: string; keepLabel: string };
 };
 export type InboxDTO = { messages: InboxMessageDTO[] };
 export type PublicChange = { label: string; before: string; after: string };
@@ -166,3 +166,5 @@ export type PulseDTO = {
   consensus: { proposals: number; ready: number; stale: number; booked: number; medianMinutesToReady?: number; medianSecondsStaleToReplan?: number; medianStaleDetectionMs?: number };
   activity: Array<{ at: string; counts: Record<string, number> }>;
 };
+/** Room-scoped slice of the same Tiger telemetry: how many live prices Accord has checked for this room's exact trip. */
+export type RoomPulseDTO = { source: 'TIGER'; observations: number; listings: number };

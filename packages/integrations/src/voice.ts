@@ -13,10 +13,12 @@ export class ElevenLabs {
       body.set("file", audio, "private-intake");
       body.set("tag_audio_events", "false");
       body.set("diarize", "false");
-      const result = z.object({ text: z.string().trim().min(1), language_code: z.string().optional() }).parse(
+      const result = z.object({ text: z.string().trim(), language_code: z.string().optional() }).parse(
         await requestJson(this.config.fetch ?? fetch, "https://api.elevenlabs.io/v1/speech-to-text", {
           method: "POST", headers: { "xi-api-key": this.config.apiKey! }, body,
         }, 45_000));
+      // A successful call with no recognizable speech is not a provider failure; tell the caller apart from a real outage.
+      if (!result.text) throw new IntegrationError("NO_SPEECH_DETECTED");
       return { ...result, requiresConfirmation: true as const };
     });
   }

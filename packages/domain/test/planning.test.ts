@@ -96,6 +96,9 @@ test("the host sets nothing about when or where; the group's answers decide", ()
   assert.equal(regionFor(["New York", "California"]), "ANY", "a spread-out group looks everywhere");
   assert.equal(regionFor(["LA"]), "ANY", "a state code isn't a place someone lives");
   assert.equal(regionFor([]), "ANY");
+  assert.equal(regionFor(["LA", "New York", "Midwest"]), "ANY", "a named region that disagrees with a recognized city is a real disagreement, not silence");
+  assert.equal(regionFor(["New York", "Midwest"]), "ANY", "New York and the Midwest are not the same region");
+  assert.equal(regionFor(["Midwest", "the midwest"]), "CENTRAL");
 
   const fromNewYork = rankDestinations({ region: "EAST", styleCounts: { CITY: 2, LAKE: 1 }, ideas: [], avoid: [], from: ["New York"], months: [7] }).map(pick => pick.name);
   assert.ok(!fromNewYork.includes("New York, NY"), "a group isn't sent to where someone lives");

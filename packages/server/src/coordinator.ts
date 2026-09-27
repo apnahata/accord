@@ -45,6 +45,8 @@ export class Coordinator {
   #timers = new Map<string, NodeJS.Timeout>();
   #locks = new Map<string, Promise<unknown>>();
   #transient = new Map<string, Transient>();
+  /** Rooms whose in-progress plan already failed once this process. A second failure stops instead of looping. */
+  #planGaveUp = new Set<string>();
   #watch?: NodeJS.Timeout;
   #ticking = false;
   #disposed = false;
@@ -111,6 +113,15 @@ export class Coordinator {
     this.#timers.set(room.id, timer);
   }
 
+  /** A plan was left on PLANNING (the process died, or ranking crashed after the search). Pick it up again. */
+  resume(room: Room) {
+    if (!this.options.enabled || this.#disposed || !this.#wantsProposal(room) || room.planning?.stage !== "PLANNING" || this.#timers.has(room.id)) return;
+    this.#transient.set(room.id, { status: "PLANNING", message: "Everyone has answered. Accord is working out where and when." });
+    const timer = setTimeout(() => void this.#advance(room.id, "READY"), this.options.readyDelayMs);
+    timer.unref();
+    this.#timers.set(room.id, timer);
+  }
+
   async #advance(roomId: string, trigger: Trigger) {
     this.#timers.delete(roomId);
     if (this.#disposed) return;
@@ -129,6 +140,16 @@ export class Coordinator {
     } catch (error) {
       if (!this.#disposed) this.state.emit(room, "AUTOPILOT_FAILED", "Accord couldn’t finish its search. Anyone in the group can try again.",
         undefined, { ...ACCORD, detail: error instanceof AppError ? error.code : "UNEXPECTED" });
+      if (room.planning?.stage === "PLANNING") {
+        if (this.#planGaveUp.has(room.id)) {
+          room.planning.stage = "NO_OPTION";
+          room.planning.message = "Accord couldn’t finish looking for a trip. Update your answers and I’ll try again.";
+          this.state.touch(room);
+        } else {
+          this.#planGaveUp.add(room.id);
+          this.resume(room);
+        }
+      }
     } finally {
       this.#transient.delete(roomId);
       await this.state.flush().catch(() => undefined);
@@ -256,6 +277,8 @@ export class Coordinator {
     const next: Constraints = nudge.check === "BUDGET" ? { ...current, maxContributionCents: Math.max(current.maxContributionCents, nudge.shareCents) }
       : nudge.check === "REFUND" ? { ...current, requiresFullCashRefund: false }
       : nudge.check === "DATES" ? { ...current, availability: [...(current.availability ?? []), { from: nudge.window!.checkIn, to: nudge.window!.checkOut }].slice(-6) }
+      // Only clear what the member was actually asked about; if they've since changed their avoid list, leave it alone.
+      : nudge.check === "PLACE" ? (current.placesToAvoid?.trim() === nudge.place ? { ...current, placesToAvoid: undefined } : current)
       : { ...current, latestCheckOutAt: nudge.checkOutAt! };
     nudge.status = "ACCEPTED";
     this.state.confirmConstraints(room, member, ConstraintsSchema.parse(next));

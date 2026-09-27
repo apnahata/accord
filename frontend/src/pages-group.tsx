@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Clock3, LockKeyhole, MapPin, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Clock3, LockKeyhole, MapPin, RefreshCw, ShieldCheck, Sparkles, Users, Zap } from 'lucide-react';
 import { Button, CheckStatus, Empty, ErrorNotice, Funding, Integrity, LinkButton, Loading, OfferCard, OfferFacts, PageHeading, PrivateNote, Stability, Stale, StayArt, Tag, Timeline } from './components';
-import { api, ApiError, date, dateTime, money, post, segment } from './api';
+import { api, ApiError, calendarDate, date, dateTime, money, post, segment } from './api';
 import { PrivateExplanationCard, PublicExplanationCard } from './explanations';
 import { useAction, useResource, useRoomEvents } from './hooks';
-import { AutopilotBanner, Inbox, WatchLine } from './autopilot';
-import { DecidedTrip, PlanningBoard, planSummary } from './planning';
-import type { AnalyticsDTO, ConsentResponseDTO, EventDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO } from './contracts';
+import { Inbox, WatchLine } from './autopilot';
+import { StepCard } from './room-step';
+import type { AnalyticsDTO, Capabilities, ConsentResponseDTO, EventDTO, InboxDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO, RoomPulseDTO } from './contracts';
 import type { MerchantMutation } from '@accord/domain';
 
 function RoomNav({ roomId, active }: { roomId: string; active: 'room' | 'offers' }) { return <nav className="room-nav" aria-label="Group navigation"><Link aria-current={active === 'room' ? 'page' : undefined} to={`/rooms/${segment(roomId)}`}>Our group</Link><Link aria-current={active === 'offers' ? 'page' : undefined} to={`/rooms/${segment(roomId)}/offers`}>Explore stays</Link><Link to={`/rooms/${segment(roomId)}/me/summary`}><LockKeyhole size={14} />My private space</Link></nav>; }
@@ -25,11 +25,34 @@ function Members({ room, base, onChange }: { room: PublicRoomDTO; base: string; 
   return <section className="panel members-panel">
     <div className="section-heading"><h3>Who’s here</h3><span className="eyebrow">{room.memberCount} {room.memberCount === 1 ? 'member' : 'members'}</span></div>
     <ul className="member-list">{room.members.map(member => <li key={member.id}><span className={`member-status ${member.ready ? 'ready' : ''}`} aria-hidden="true">{member.ready ? <Check size={13} /> : null}</span><span className="member-name"><strong>{member.displayName}</strong>{member.isYou && <small> (you)</small>}{member.isHost && <small> · host</small>}<small className="member-state">{member.ready ? 'Requirements confirmed' : 'Waiting on requirements'}</small></span>{room.viewerIsHost && !member.isHost && !member.ready && <button className="text-button member-remove" disabled={action.busy} onClick={() => remove(member.id, member.displayName)}>Remove</button>}{member.isYou && !member.isHost && room.status !== 'BOOKED' && <button className="text-button member-remove" disabled={action.busy} onClick={leave}>Leave group</button>}</li>)}</ul>
-    {room.viewerIsHost && <><p className="fine">As host, you can remove members who haven’t confirmed their requirements yet.</p><Link className="text-button" to={`${base}/demo/merchant`}>Open demo event controls <ArrowRight size={14} /></Link></>}
+    {room.viewerIsHost && <p className="fine">As host, you can remove members who haven’t confirmed their requirements yet.</p>}
     <ErrorNotice error={action.error} />
   </section>;
 }
+function MerchantDemoCallout({ base }: { base: string }) {
+  return <section className="panel decision-invitation merchant-demo-callout">
+    <Zap size={22} />
+    <Tag>Host demo</Tag>
+    <h3>Simulate a real-world change</h3>
+    <p>See what happens when a merchant changes price or terms after everyone has approved.</p>
+    <LinkButton to={`${base}/demo/merchant`}>Demo: change the offer</LinkButton>
+  </section>;
+}
 function LiveLabel({ connection }: { connection: string }) { return <span className={`live-label ${connection === 'live' ? '' : 'offline'}`}><span />{connection === 'live' ? 'Live with your group' : connection === 'connecting' ? 'Connecting…' : 'Reconnecting · checking for updates'}</span>; }
+
+/** Contextual, real-data link to the public market dashboard — hidden whenever Tiger is unconfigured or there's nothing yet worth surfacing. */
+function MarketPulseCallout({ room, base }: { room: PublicRoomDTO; base: string }) {
+  const capabilities = useResource<Capabilities>('/capabilities');
+  const tigerAvailable = capabilities.data?.tiger.available === true;
+  const roomPulse = useResource<RoomPulseDTO>(tigerAvailable && room.trip ? `${base}/pulse` : null);
+  if (!tigerAvailable || !room.trip || !roomPulse.data || roomPulse.data.observations === 0) return null;
+  return <section className="panel pulse-callout">
+    <Activity size={20} />
+    <h3>Nobody can quietly reprice this trip.</h3>
+    <p>Accord has checked <strong>{roomPulse.data.observations.toLocaleString('en-US')}</strong> live {roomPulse.data.observations === 1 ? 'price' : 'prices'} across {roomPulse.data.listings.toLocaleString('en-US')} {roomPulse.data.listings === 1 ? 'listing' : 'listings'} for your group’s exact dates and guest count, timestamped in Tiger Data — the same record Accord uses to void a proposal the moment a price moves.</p>
+    <Link to="/pulse" className="text-button">See the live market <ArrowRight size={15} /></Link>
+  </section>;
+}
 
 export function Room() {
   const { roomId = '' } = useParams();
@@ -37,50 +60,24 @@ export function Room() {
   const live = useRoomEvents(roomId);
   const room = useResource<PublicRoomDTO>(base, live.revision);
   const proposal = useResource<ProposalEnvelope>(room.data?.activeProposalId ? `/proposals/${segment(room.data.activeProposalId)}/public` : null, live.revision);
-  const events = useResource<{ events: EventDTO[] }>(`${base}/events`, live.revision);
-  const action = useAction();
-  const navigate = useNavigate();
-  const [invite, setInvite] = useState<string>();
-  const inviteTools = <>
-    <div className="button-row"><Button className="secondary" disabled={action.busy} onClick={() => action.run(async () => { const result = await post<{ inviteToken: string; inviteUrl?: string }>(`${base}/invites`); setInvite(result.inviteUrl ?? `${window.location.origin}/join/${segment(result.inviteToken)}`); })}>Invite friends</Button></div>
-    {invite && <div className="notice"><div><label htmlFor="room-invite">Share this private join link</label><input id="room-invite" value={invite} readOnly onFocus={event => event.target.select()} /></div></div>}
-  </>;
-  const planning = room.data?.planning;
-  const undecided = !!planning && planning.stage !== 'DECIDED';
-  const autopilotBusy = ['REPLANNING', 'SEARCHING', 'WIDENING'].includes(room.data?.autopilot?.status ?? '');
-  const heading = room.data?.trip ? `${room.data.trip.destination} · ${date(`${room.data.trip.checkIn}T12:00:00`)} – ${date(`${room.data.trip.checkOut}T12:00:00`)} · ${room.data.trip.guests} guests`
-    : planning ? planSummary(planning) : room.data?.goal;
-  return <div className="page">
-    <RoomNav roomId={roomId} active="room" />
-    <PageHeading eyebrow="Your next chapter, together" title={room.data?.name || 'Your shared space'} description={heading} aside={<LiveLabel connection={live.connection} />} />
-    {room.loading && !room.data && <Loading />}<ErrorNotice error={room.error} retry={room.refresh} />
+  const personal = useResource<PrivateProposalEnvelope>(room.data?.activeProposalId ? `/proposals/${segment(room.data.activeProposalId)}/me` : null, live.revision);
+  const inbox = useResource<InboxDTO>(`${base}/me/inbox`, live.revision);
+  const nudge = inbox.data?.messages.find(message => message.kind === 'NUDGE' && message.nudge?.status === 'OPEN');
+  const refresh = () => { room.refresh(); inbox.refresh(); personal.refresh(); };
+  return <div className="page step-room">
+    {room.loading && !room.data && <Loading />}
+    <ErrorNotice error={room.error} retry={room.refresh} />
     {room.data && <>
-      <div className="readiness-strip"><span className="icon-circle"><Users size={22} /></span><div><strong>{room.data.readyMemberCount} / {room.data.memberCount} private profiles ready</strong><span>Personal boundaries stay personal. Possibilities are shared.</span></div><Tag>{undecided ? 'planning' : room.data.status.replaceAll('_', ' ').toLowerCase()}</Tag></div>
-      <AutopilotBanner autopilot={room.data.autopilot} />
-      <div className="room-grid"><div className="stack">
-        {planning?.stage === 'DECIDED' && <DecidedTrip room={room.data} base={base} onChange={room.refresh} />}
-        {undecided ? <PlanningBoard room={room.data} base={base} onChange={room.refresh} invite={inviteTools} /> : room.data.status === 'STALE' ? <Stale changes={proposal.data?.changes}>
-          {autopilotBusy && <p className="replanning-note"><span className="autopilot-dot" aria-hidden="true" />Accord is already looking for another option. You don’t need to do anything.</p>}
-          <Button className={room.data.autopilot?.status === 'REPLANNING' ? 'secondary' : ''} disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`, { replan: true }); room.refresh(); })}>{action.busy ? 'Searching…' : room.data.autopilot?.status === 'REPLANNING' ? 'Search now' : 'Find another option'}<ArrowRight size={17} /></Button>
-        </Stale> : room.data.status === 'SEARCHING' ? <section className="panel searching"><span className="orbit" /><p className="eyebrow">Finding your common ground</p><h2>Looking for the shared yes.</h2><p>Accord is checking current stays against everyone’s confirmed requirements.</p><Loading /></section>
-          : room.data.status === 'BOOKED' ? <section className="panel booked-banner"><CheckCheck size={35} /><h2>Your group has a booking.</h2><p>Open your receipt for the provider mode and confirmed details.</p><LinkButton to={`${base}/receipt`}>View booking receipt</LinkButton></section>
-          : proposal.data && proposal.data.proposal.state !== 'STALE' ? <section className="panel current-proposal"><div className="section-heading"><p className="eyebrow">Your shared possibility</p><Tag>Proposal v{proposal.data.proposal.version}</Tag></div><StayArt city={proposal.data.proposal.offer.city} large /><div className="current-body"><p className="eyebrow"><MapPin size={13} />{proposal.data.proposal.offer.city}</p><h2>{proposal.data.proposal.offer.propertyName}</h2><p>{proposal.data.proposal.offer.roomType}</p><div className="feasibility"><CheckCheck size={18} />{proposal.data.proposal.offer.feasible ? 'Works for everyone’s confirmed requirements' : 'Doesn’t currently satisfy all confirmed requirements'}</div><div className="price-row"><div><strong>{money(proposal.data.proposal.equalShareCents)}</strong><span> / person</span></div><span>{money(proposal.data.proposal.offer.totalCents)} total</span></div><LinkButton to={`/proposals/${segment(proposal.data.proposal.proposalId)}`}>Meet your proposal</LinkButton></div></section>
-          : <section className="panel">
-            {room.data.autopilot?.status === 'NO_OPTION' ? <Empty title="No shared yes just yet.">Everyone has confirmed, but no current stay works for all of you. Accord is still looking, and anyone can review their own requirements privately.</Empty> : <Empty title="A good plan leaves room for everyone.">Invite your friends, then each confirm your requirements in your own private space.</Empty>}
-            <div className="button-row"><LinkButton to={`${base}/me/intake`}>Set my boundaries</LinkButton></div>
-            {inviteTools}
-            <hr /><Button className="secondary" disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`); room.refresh(); navigate(`${base}/offers`); })}>{action.busy ? (room.data.trip && !planning?.rehearsal ? 'Searching…' : 'Finding stays…') : 'Search now'} <ArrowRight size={16} /></Button>
-            <p className="fine">{room.data.trip && !planning?.rehearsal ? 'Once everyone has confirmed, Accord searches Nuitée Connect on its own and proposes the best shared fit.' : 'Once everyone has confirmed, Accord searches on its own and proposes the best shared fit.'}</p>
-          </section>}
-        <ErrorNotice error={proposal.error} retry={proposal.refresh} /><ErrorNotice error={action.error} />
-        <Link to={`${base}/offers`} className="explore-link"><span><strong>A little more room to explore</strong><small>Compare stays and see how Accord found your common ground.</small></span><ArrowRight size={22} /></Link>
-      </div><aside className="stack">
-        <Inbox roomId={roomId} revision={live.revision} />
-        {proposal.data && <Funding proposal={proposal.data.proposal} />}
-        <Members room={room.data} base={base} onChange={room.refresh} />
-        <section className="private-mini"><LockKeyhole size={20} /><h3>Your boundaries. Your business.</h3><p>Only you can see and edit your personal requirements.</p><Link to={`${base}/me/summary`} className="text-button">My private space <ArrowRight size={15} /></Link></section>
-        {events.data && <Timeline events={events.data.events} />}<ErrorNotice error={events.error} retry={events.refresh} />
-      </aside></div>
+      <header className="step-head">
+        <h1>{room.data.name}</h1>
+        <p className="lead">{room.data.members.map(member => member.displayName).join(' · ')}</p>
+      </header>
+      <StepCard room={room.data} base={base} proposal={proposal.data} personal={personal.data} nudge={nudge} onChange={refresh} />
+      <ErrorNotice error={proposal.error} retry={proposal.refresh} />
+      <div className="step-extras">
+        {room.data.viewerIsHost && <MerchantDemoCallout base={base} />}
+        <MarketPulseCallout room={room.data} base={base} />
+      </div>
     </>}
   </div>;
 }
@@ -122,7 +119,38 @@ function ProposalContent({ proposalId, privateView }: { proposalId: string; priv
   const approved = personal?.myApprovalStatus === 'APPROVED';
   const authorized = personal?.myPaymentStatus === 'AUTHORIZED' || personal?.myPaymentStatus === 'CAPTURED';
   const canSubmit = !!personal && personal.proposal.state === 'OPEN' && !expired && !approved && !resource.loading && !resource.error && acknowledgedHash === proposal?.proposalHash;
-  return <div className={`page ${privateView ? 'private-page' : ''}`}>
+  const approve = () => action.run(async () => {
+    if (!personal || !proposal) return;
+    try {
+      const result = await post<ConsentResponseDTO>(`${base}/consent`, { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: personal.myContributionCents }, { 'Idempotency-Key': idempotency.current });
+      if (result.proposalHash !== proposal.proposalHash || result.version !== proposal.version || result.amountCents !== personal.myContributionCents || result.approvalStatus !== 'APPROVED') throw new Error('We couldn’t verify the approval result. Refresh before trying again.');
+      if (data?.roomId) navigate(`/rooms/${segment(data.roomId)}`);
+    } finally { setAcknowledgedHash(undefined); resource.refresh(); }
+  });
+  if (privateView) {
+    const problems = personal?.myConstraintChecks.filter(check => check.status !== 'PASS') ?? [];
+    return <div className="page step-room">
+      {roomId && <Link to={`/rooms/${segment(roomId)}`} className="back-link"><ArrowLeft size={15} />Back</Link>}
+      {resource.loading && !data && <Loading />}
+      <ErrorNotice error={resource.error} retry={resource.refresh} />
+      {data && proposal && personal && <section className="step-card">
+        <p className="step-from"><Sparkles size={14} />Accord</p>
+        <h2>{stale ? 'This stay changed.' : approved ? 'You’ve approved.' : 'Approve your share.'}</h2>
+        <h3>{proposal.offer.propertyName}</h3>
+        <p className="subtle">{proposal.offer.city} · {calendarDate(proposal.offer.checkInDate)} – {calendarDate(proposal.offer.checkOutDate)}</p>
+        <p className="step-price"><strong>{money(personal.myContributionCents)}</strong></p>
+        {problems.length > 0 ? <ul className="why-list">{problems.map(check => <li key={check.label}>{check.label}. {check.privateExplanation}</li>)}</ul> : !stale && <p>This fits what you told Accord.</p>}
+        {!stale && !approved && proposal.state === 'OPEN' && <>
+          <label className="checkbox-row"><input type="checkbox" checked={acknowledgedHash === proposal.proposalHash} onChange={event => setAcknowledgedHash(event.target.checked ? proposal.proposalHash : undefined)} /><span>This is the stay and the amount I mean.</span></label>
+          <div className="step-action"><Button disabled={!canSubmit || action.busy} onClick={approve}>{action.busy ? 'Saving…' : `Approve ${money(personal.myContributionCents)}`}</Button></div>
+        </>}
+        {approved && !stale && <div className="step-action"><LinkButton to={`/rooms/${segment(data.roomId)}`}>Back to the trip</LinkButton></div>}
+        {stale && <div className="step-action"><LinkButton to={`/rooms/${segment(data.roomId)}`}>Back to the trip</LinkButton></div>}
+        <ErrorNotice error={action.error} />
+      </section>}
+    </div>;
+  }
+  return <div className="page">
     {roomId && <Link to={`/rooms/${segment(roomId)}`} className="back-link"><ArrowLeft size={15} />Back to your group</Link>}
     <PageHeading eyebrow={privateView ? 'Your decision. Your exact contribution.' : 'One plan. Everyone on board.'} title={stale ? 'The offer changed. Your trust shouldn’t.' : proposal ? `A shared stay in ${proposal.offer.city}.` : 'Your shared proposal'} aside={proposal && <Tag>Proposal v{proposal.version}</Tag>} />
     {resource.loading && !data && <Loading />}
@@ -230,15 +258,15 @@ export function Merchant() {
       })}>{label}<ArrowRight size={15} /></Button>)}</div></>}
       <p role="status">{lastAction}</p><ErrorNotice error={action.error} /><hr />
       {confirmReset ? <div><p>Reset the demo’s rooms, sessions, merchant offers, and payment ledger? Existing browser sessions will be signed out.</p><div className="button-row"><Button disabled={action.busy} onClick={() => action.run(async () => { await post('/demo/reset', { confirmed: true }); setConfirmReset(false); setLastAction('Demo reset confirmed by backend.'); resource.refresh(); analytics.refresh(); })}>Confirm demo reset</Button><Button className="secondary" onClick={() => setConfirmReset(false)}>Cancel</Button></div></div> : <Button className="secondary" onClick={() => setConfirmReset(true)}><RefreshCw size={15} />Reset demo</Button>}
-    </section><aside>{analytics.data?.source === 'TIGER' ? <TigerChart data={analytics.data} /> : <section className="panel"><h3>Transaction timeline</h3><p className="subtle">Tiger-backed analytics are unavailable. No observed timeline is shown.</p></section>}</aside></div>}
+    </section><aside>{analytics.data?.source === 'TIGER' ? <TigerChart data={analytics.data} /> : <section className="panel"><h3>Proof this offer hasn't quietly changed</h3><Empty title="Tiger-backed analytics are unavailable.">No observed price timeline can be shown here without Tiger Data configured — nothing is fabricated in its place.</Empty></section>}</aside></div>}
   </div>;
 }
 function TigerChart({ data }: { data: AnalyticsDTO }) {
   const points = data.points.filter(point => Number.isFinite(point.totalCents) && Number.isFinite(Date.parse(point.at)));
-  if (!points.length) return <section className="panel"><h3>Transaction timeline</h3><p>No Tiger events to plot yet.</p></section>;
+  if (!points.length) return <section className="panel"><h3>Proof this offer hasn't quietly changed</h3><Empty title="No recorded price events yet.">Every merchant mutation you trigger below is written to Tiger Data and appears here immediately, timestamped — this is what lets Accord catch a repriced offer after a group has already approved it.</Empty></section>;
   const times = points.map(point => Date.parse(point.at));
   const minTime = Math.min(...times), maxTime = Math.max(...times);
   const min = Math.min(...points.map(point => point.totalCents)), max = Math.max(...points.map(point => point.totalCents));
   const coords = points.map(point => ({ x: 65 + (Date.parse(point.at) - minTime) / Math.max(1, maxTime - minTime) * 410, y: 180 - (point.totalCents - min) / Math.max(1, max - min) * 135 }));
-  return <section className="panel"><h3>Live transaction timeline</h3><p className="subtle">Actual persisted Tiger events · This planning session</p><svg className="timeline-chart" viewBox="0 0 500 220" role="img" aria-label="Offer price at recorded transaction events"><line x1="65" x2="480" y1="180" y2="180" stroke="#c9cec6" /><text x="0" y="48">{money(max)}</text><text x="0" y="184">{money(min)}</text><polyline fill="none" stroke="#356650" strokeWidth="2" points={coords.map(p => `${p.x},${p.y}`).join(' ')} />{coords.map((point, i) => <circle key={i} cx={point.x} cy={point.y} r="5" fill="#356650"><title>{points[i].label}: {money(points[i].totalCents)} at {dateTime(points[i].at)}</title></circle>)}</svg><ol className="chart-legend">{points.map((point, index) => <li key={index}><span>{point.label}</span><strong>{money(point.totalCents)}</strong><time>{dateTime(point.at)}</time></li>)}</ol></section>;
+  return <section className="panel"><h3>Proof this offer hasn't quietly changed</h3><p className="subtle">Every recorded price for this offer, straight from Tiger Data · this planning session</p><svg className="timeline-chart" viewBox="0 0 500 220" role="img" aria-label="Offer price at recorded transaction events"><line x1="65" x2="480" y1="180" y2="180" stroke="#c9cec6" /><text x="0" y="48">{money(max)}</text><text x="0" y="184">{money(min)}</text><polyline fill="none" stroke="#2a78d6" strokeWidth="2" points={coords.map(p => `${p.x},${p.y}`).join(' ')} />{coords.map((point, i) => <circle key={i} cx={point.x} cy={point.y} r="5" fill="#2a78d6"><title>{points[i].label}: {money(points[i].totalCents)} at {dateTime(points[i].at)}</title></circle>)}</svg><ol className="chart-legend">{points.map((point, index) => <li key={index}><span>{point.label}</span><strong>{money(point.totalCents)}</strong><time>{dateTime(point.at)}</time></li>)}</ol></section>;
 }

@@ -48,6 +48,27 @@ const MAX_DESTINATIONS = 3, MAX_SEARCHES = 6;
 const styleLabel: Record<TripStyle, string> = { BEACH: "beach", MOUNTAINS: "mountains", SKI: "ski", CITY: "city", NATURE: "nature", THEME_PARKS: "theme parks", LAKE: "lake" };
 const list = (items: string[]) => items.length <= 2 ? items.join(" and ") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 const validZone = (zone: string) => { try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); return true; } catch { return false; } };
+// A specific place ("Reno, NV", "Ohio") is worth forcing back onto the shortlist if the model drops it;
+// a vague wish ("somewhere warm") is not a searchable destination and would just fail every search.
+const looksLikeAPlace = (text: string) => /^[A-Z]/.test(text) && !/\b(somewhere|anywhere|someplace|any\s?place)\b/i.test(text);
+const US_STATES: Record<string, string> = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware",
+  FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky",
+  LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri",
+  MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina",
+  ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina",
+  SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia",
+  WI: "Wisconsin", WY: "Wyoming", DC: "District of Columbia",
+};
+// A suggested "City, ST" already covers an idea like "LA" (city initials) or "Ohio" (the state it's in),
+// even though `mentions` alone won't see it: neither is in the internal catalog `mentions` knows about.
+function alreadyCovers(idea: string, suggestionName: string): boolean {
+  if (mentions(idea, suggestionName)) return true;
+  const [city = "", abbreviation = ""] = suggestionName.split(",").map(part => part.trim());
+  const initials = city.split(/\s+/).map(word => word[0] ?? "").join("").toUpperCase();
+  const stateName = US_STATES[abbreviation.toUpperCase()];
+  return initials === idea.trim().toUpperCase() || (!!stateName && idea.trim().toLowerCase() === stateName.toLowerCase());
+}
 
 /**
  * Decides where and when for a group that hasn't. Dates come from a deterministic overlap of everyone's
@@ -97,10 +118,7 @@ export class Planner {
 
     const { ideas, source } = await this.#destinations(room, members, windows);
     planning.destinations = ideas;
-    if (!ideas.length) {
-      this.#settle(room, planning, "NO_OPTION", "Every destination Accord considered was ruled out by someone. Members can revisit the places they’d rather avoid.");
-      return;
-    }
+    if (!ideas.length) { await this.#noDestinations(room, planning, members, windows); return; }
     this.state.emit(room, "PLAN_DESTINATIONS", `Accord is considering ${list(ideas.map(idea => idea.name))}.`, undefined,
       { ...ACCORD, detail: source === "AI"
         ? "Suggested by Gemini from anonymous totals of the trip styles people picked. Budgets and names were not shared."
@@ -247,6 +265,35 @@ export class Planner {
       : "No dates work for everyone. Members can update when they’re free.");
   }
 
+  /** Every catalog/AI destination was ruled out by someone's avoid list. Privately ask whoever alone blocks a workable trip. */
+  async #noDestinations(room: Room, planning: Planning, members: Ready, windows: DateWindow[]) {
+    const styleCounts: Partial<Record<TripStyle, number>> = {};
+    for (const member of members) for (const style of member.constraints.tripStyles ?? []) styleCounts[style] = (styleCounts[style] ?? 0) + 1;
+    const ideas = members.map(member => member.constraints.placeIdeas?.trim()).filter((text): text is string => !!text).sort();
+    const from = members.map(member => member.constraints.leavingFrom?.trim()).filter((text): text is string => !!text).sort();
+    const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
+    const blockers = members.filter(member => member.constraints.placesToAvoid?.trim());
+    let waiting = false;
+    for (const member of blockers) {
+      const place = member.constraints.placesToAvoid!.trim();
+      const avoidWithoutMe = blockers.filter(other => other.id !== member.id).map(other => other.constraints.placesToAvoid!.trim());
+      // If a good trip still doesn't emerge even without this member's avoid list, they aren't the (sole) blocker; don't ask them.
+      const unlocked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid: avoidWithoutMe, from, months }, 1);
+      if (!unlocked.length) continue;
+      const inbox = member.inbox ?? [];
+      if (inbox.some(entry => entry.nudge?.status === "OPEN")) { waiting = true; continue; }
+      if (inbox.filter(entry => entry.kind === "NUDGE").length >= this.hooks.maxNudgesPerMember) continue;
+      if (inbox.some(entry => entry.nudge?.status === "KEPT" && entry.nudge.check === "PLACE" && entry.nudge.place === place)) continue;
+      this.state.notify(room, member.id, { kind: "NUDGE", title: "One trip works for everyone but you",
+        body: `${unlocked[0]!.name} could work for everyone else, but you said to avoid it. You can drop that for this trip, or keep it. No one else will see what you choose.`,
+        nudge: { status: "OPEN", check: "PLACE", shareCents: 0, place } });
+      waiting = true;
+    }
+    this.#settle(room, planning, "NO_OPTION", waiting
+      ? "No destination works for everyone yet. Accord has privately checked in with some members."
+      : "Every destination Accord considered was ruled out by someone. Members can revisit the places they’d rather avoid.");
+  }
+
   async #destinations(room: Room, members: Ready, windows: DateWindow[]) {
     const styleCounts: Partial<Record<TripStyle, number>> = {};
     for (const member of members) for (const style of member.constraints.tripStyles ?? []) styleCounts[style] = (styleCounts[style] ?? 0) + 1;
@@ -262,7 +309,12 @@ export class Planner {
         .map(idea => ({ name: idea.name.trim(), timeZone: validZone(idea.timeZone) ? idea.timeZone : "America/New_York", why: idea.why.trim().slice(0, 160), styles: idea.styles }))
         .filter((idea, index, all) => idea.name.length >= 2 && !ruledOut(idea.name) && all.findIndex(other => other.name.toLowerCase() === idea.name.toLowerCase()) === index)
         .slice(0, MAX_DESTINATIONS);
-      if (suggested.length) return { ideas: suggested, source: "AI" as const };
+      // The model can silently drop a specific place someone asked for; never let its judgment override an
+      // explicit request. Anything it left out (and no one else ruled out) is added back as its own real
+      // candidate, using the member's own words, so it gets an actual search and a real vote.
+      const missed = ideas.filter(idea => looksLikeAPlace(idea) && !ruledOut(idea) && !suggested.some(item => alreadyCovers(idea, item.name)));
+      const forced = missed.map(idea => ({ name: idea, timeZone: "America/New_York", why: "Someone in the group asked to go here.", styles: [] as TripStyle[] }));
+      if (suggested.length || forced.length) return { ideas: [...suggested, ...forced], source: "AI" as const };
     }
     const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
     const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, MAX_DESTINATIONS);

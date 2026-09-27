@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowRight, LockKeyhole } from 'lucide-react';
-import { Button, ErrorNotice, PageHeading, PrivateNote } from './components';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { ArrowRight } from 'lucide-react';
+import { Button, ErrorNotice } from './components';
 import { post } from './api';
 import { useAction } from './hooks';
 import type { AccountDTO } from './contracts';
@@ -25,20 +25,18 @@ export function Auth() {
       navigate(safeNext(location.search), { replace: true });
     });
   }
-  return <div className="page narrow"><PageHeading eyebrow="Your private Accord account" title={mode === 'register' ? 'Keep every trip in one place.' : 'Welcome back.'} description="Your account links your groups, approvals, bookings, and private payment records across browsers and devices." />
-    <section className="panel form-panel">
-      <div className="segmented" aria-label="Account action"><button type="button" aria-pressed={mode === 'register'} onClick={() => setMode('register')}>Create account</button><button type="button" aria-pressed={mode === 'login'} onClick={() => setMode('login')}>Sign in</button></div>
-      <form onSubmit={submit}>
-        {mode === 'register' && <><label htmlFor="auth-name">Display name</label><input id="auth-name" name="displayName" autoComplete="name" required maxLength={60} /></>}
+  const joining = new URLSearchParams(location.search).get('next')?.startsWith('/join/');
+  return <div className="page step-room">
+    <header className="step-head"><h1>{mode === 'register' ? (joining ? 'Sign up to join.' : 'Start with your name.') : 'Welcome back.'}</h1></header>
+    <section className="step-card">
+      <div className="segmented" aria-label="Account action"><button type="button" aria-pressed={mode === 'register'} onClick={() => setMode('register')}>New</button><button type="button" aria-pressed={mode === 'login'} onClick={() => setMode('login')}>I have an account</button></div>
+      <form className="form-panel" onSubmit={submit}>
+        {mode === 'register' && <><label htmlFor="auth-name">Your name</label><input id="auth-name" name="displayName" autoComplete="name" required maxLength={60} placeholder="Alex" /></>}
         <label htmlFor="auth-email">Email</label><input id="auth-email" name="email" type="email" autoComplete="email" required maxLength={254} />
-        <label htmlFor="auth-password">Password</label><input id="auth-password" name="password" type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} required minLength={10} maxLength={128} />
-        {mode === 'register' && <p className="field-help">Use at least 10 characters.</p>}
-        <Button disabled={action.busy}>{action.busy ? 'Please wait…' : mode === 'register' ? 'Create my account' : 'Sign in'}<ArrowRight size={17} /></Button>
+        <label htmlFor="auth-password">Password</label><input id="auth-password" name="password" type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} required minLength={10} maxLength={128} placeholder={mode === 'register' ? 'At least 10 characters' : ''} />
+        <Button disabled={action.busy}>{action.busy ? 'Please wait…' : mode === 'register' ? 'Continue' : 'Sign in'}<ArrowRight size={17} /></Button>
       </form>
       <ErrorNotice error={action.error} />
-      <PrivateNote />
-      <p className="fine"><LockKeyhole size={13} /> Passwords are salted and hashed. Your private requirements are encrypted before MongoDB storage.</p>
     </section>
-    <Link className="text-button" to="/">Back to Accord</Link>
   </div>;
 }

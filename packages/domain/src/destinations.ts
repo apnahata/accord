@@ -63,14 +63,25 @@ export function isHome(departure: string, destination: string) {
   return phrase(departure, destination.split(",")[0]!.trim());
 }
 
+// Unambiguous region names people actually say instead of a city ("I'm coming from the Midwest").
+// Deliberately excludes anything a bare abbreviation could also mean (see the "LA" test below).
+const REGION_WORDS: Record<string, Exclude<Region, "ANY">> = {
+  "midwest": "CENTRAL", "the midwest": "CENTRAL",
+  "west coast": "WEST", "pacific northwest": "WEST",
+  "east coast": "EAST", "northeast": "EAST",
+};
+
 /**
  * The part of the country everyone is leaving from, when every departure Accord recognizes agrees.
  * Anything mixed or unrecognized looks everywhere.
  */
 export function regionFor(departures: readonly string[]): Region {
   // Full city and state names only: "leaving from LA" means Los Angeles, not Louisiana.
-  const regions = new Set(departures.flatMap(text => DESTINATIONS
-    .filter(item => phrase(text, item.name.split(",")[0]!) || phrase(text, item.state)).map(item => item.region)));
+  const regions = new Set(departures.flatMap(text => {
+    const named = DESTINATIONS.filter(item => phrase(text, item.name.split(",")[0]!) || phrase(text, item.state)).map(item => item.region);
+    const worded = Object.entries(REGION_WORDS).filter(([word]) => phrase(text, word)).map(([, region]) => region);
+    return [...named, ...worded];
+  }));
   return regions.size === 1 ? [...regions][0]! : "ANY";
 }
 
@@ -88,6 +99,15 @@ export function rankDestinations(input: { region: Region; styleCounts: Partial<R
     .map(({ item }) => ({ item, fit: item.styles.reduce((sum, style) => sum + (input.styleCounts[style] ?? 0), 0) + 2 * input.ideas.filter(text => mentions(text, item.name)).length }));
   const anyWishes = pool.some(entry => entry.fit > 0);
   const picked: Destination[] = [];
+  // An explicit destination wish is honored directly, not just fit-boosted: the first still-eligible
+  // catalog match for each stated idea is guaranteed a slot, in the order ideas were given, before any
+  // style-fit ranking fills the rest. A crowded room of strong style matches must never silently bury
+  // one person's specific request.
+  for (const idea of input.ideas) {
+    if (picked.length >= limit) break;
+    const match = pool.find(entry => !picked.includes(entry.item) && mentions(idea, entry.item.name));
+    if (match) picked.push(match.item);
+  }
   while (picked.length < limit) {
     const scored = pool.filter(entry => !picked.includes(entry.item) && (!anyWishes || entry.fit > 0))
       .map(entry => ({ ...entry, adjusted: entry.fit

@@ -98,7 +98,7 @@ test("while a trip is still being planned, the intake asks for dates and picks u
   const first = [{ role: "user", content: "Up to $500, and I'd love a beach." }];
   const asked = await extract(first);
   assert.equal(asked.stage, "CLARIFYING");
-  assert.match(asked.reply, /When could you travel/);
+  assert.match(asked.reply, /When are you free/);
   assert.match(prompts[0]!, /trip length/);
   const drafted = await extract([...first, { role: "assistant", content: asked.reply }, { role: "user", content: "Any time after the 40th day from now, about 4 nights, from Boston." }]);
   assert.equal(drafted.stage, "REVIEW");

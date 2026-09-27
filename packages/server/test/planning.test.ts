@@ -152,6 +152,29 @@ test("when two members could each unblock the dates, one yes retires the other's
   assert.deepEqual((await call(`/rooms/${roomId}/me/constraints`, "GET", undefined, cookies.Mateo)).data.constraints.availability, [{ from: day(30), to: day(42) }]);
 });
 
+test("when one member's avoid list rules out every destination, Accord privately asks only them, and accepting unblocks planning", async t => {
+  const call = await start(t);
+  const everyCity = DESTINATIONS.map(item => item.name.split(",")[0]).join(", ");
+  const { roomId, cookies } = await plannedGroup(call, {
+    Alex: { tripStyles: ["CITY"] },
+    Priya: { tripStyles: ["CITY"] },
+    Jordan: { tripStyles: ["CITY"], placesToAvoid: everyCity },
+  });
+  const room = async () => (await call(`/rooms/${roomId}`, "GET", undefined, cookies.Alex)).data;
+  const stuck = await waitFor(async () => { const data = await room(); return data.planning?.stage === "NO_OPTION" && data; }, "the destination conflict");
+  assert.match(stuck.autopilot.message, /privately checked in/);
+  for (const name of ["Alex", "Priya"]) assert.ok(!(await call(`/rooms/${roomId}/me/inbox`, "GET", undefined, cookies[name])).data.messages.some((message: any) => message.kind === "NUDGE"));
+  const nudge = (await call(`/rooms/${roomId}/me/inbox`, "GET", undefined, cookies.Jordan)).data.messages.find((message: any) => message.kind === "NUDGE");
+  assert.equal(nudge.nudge.check, "PLACE");
+  assert.equal(nudge.nudge.acceptLabel, "Drop that for this trip");
+  assert.ok(!JSON.stringify(nudge).includes("Alex") && !JSON.stringify(nudge).includes("Priya"));
+
+  assert.equal((await call(`/rooms/${roomId}/me/inbox/${nudge.id}/respond`, "POST", { action: "ACCEPT" }, cookies.Jordan)).status, 200);
+  await waitFor(async () => { const data = await room(); return ["VOTING", "DECIDED"].includes(data.planning?.stage) && data; }, "planning after Jordan's yes");
+  const capsule = (await call(`/rooms/${roomId}/me/constraints`, "GET", undefined, cookies.Jordan)).data.constraints;
+  assert.equal(capsule.placesToAvoid, undefined);
+});
+
 function plannedState(suggest?: (input: DestinationsInput) => Promise<DestinationIdea[] | undefined>) {
   const state = new AccordState(undefined, suggest ? { suggestDestinations: suggest } : {}, { enabled: false, watchIntervalMs: 0 });
   const created = state.createRoom("Trip", "Plan it", "Alex", undefined, undefined, { plan: { countryCode: "US" }, rehearsal: true });
@@ -261,6 +284,34 @@ test("a single workable trip is chosen without a vote, and the host can reopen p
   assert.equal(room.trip, undefined);
   assert.equal(proposal.state, "STALE");
   assert.equal(state.roomDTO(room, alex.id).planning!.stage, "PLANNING");
+});
+
+test("an explicit destination wish the model drops is added back as a real candidate, without naming who asked", async () => {
+  const { state, room, alex, priya } = plannedState(async () => [
+    { name: "Miami, FL", timeZone: "America/New_York", styles: ["BEACH"], why: "Beaches." },
+    { name: "Boston, MA", timeZone: "America/New_York", styles: ["CITY"], why: "Close by." },
+  ]);
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, tripStyles: ["BEACH"], placeIdeas: "Reno, NV" }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["CITY"] }));
+  await state.autopilot.planNow(room);
+  const view = state.roomDTO(room, alex.id).planning!;
+  const reno = view.destinations.find(item => item.name === "Reno, NV");
+  assert.ok(reno, "the model's own list left it out, but it must still become a real option");
+  assert.ok(view.options.some(option => option.destination === "Reno, NV"), "it must actually be searched, not just listed");
+  assert.ok(!reno!.why.toLowerCase().includes("alex"), "the reason must never say whose idea it was");
+  assert.equal(view.destinations.length, 3, "the model's two picks are kept alongside the restored one");
+});
+
+test("a resolved abbreviation or state already on the model's list is recognized, not duplicated", async () => {
+  const { state, room, alex, priya } = plannedState(async () => [
+    { name: "Los Angeles, CA", timeZone: "America/Los_Angeles", styles: ["CITY"], why: "A big city trip." },
+    { name: "Columbus, OH", timeZone: "America/New_York", styles: ["CITY"], why: "A big city trip." },
+  ]);
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, tripStyles: ["CITY"], placeIdeas: "LA" }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["CITY"], placeIdeas: "Ohio" }));
+  await state.autopilot.planNow(room);
+  const names = state.roomDTO(room, alex.id).planning!.destinations.map(item => item.name);
+  assert.deepEqual(names, ["Los Angeles, CA", "Columbus, OH"], "the model already resolved both ideas to real cities; nothing duplicate should be forced in");
 });
 
 test("rehearsal stays are deterministic and cover the trip exactly", async () => {
