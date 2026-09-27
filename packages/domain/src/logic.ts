@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { Constraints, MerchantMutation, Offer } from "./schemas.js";
-import { OfferSchema } from "./schemas.js";
+import type { Availability, Constraints, MerchantMutation, Offer } from "./schemas.js";
+import { OfferSchema, PLANNING_HORIZON_DAYS } from "./schemas.js";
 
 export function equalShares(totalCents: number, memberIds: readonly string[]) {
   if (!Number.isSafeInteger(totalCents) || totalCents < 0 || !memberIds.length || new Set(memberIds).size !== memberIds.length) throw new Error("INVALID_SPLIT");
@@ -9,10 +9,27 @@ export function equalShares(totalCents: number, memberIds: readonly string[]) {
   return Object.fromEntries(ids.map((id, index) => [id, base + Number(index < remainder)]));
 }
 
-export type Check = { kind: "BUDGET" | "CHECKIN_DATE_EARLIEST" | "CHECKIN_DATE_LATEST" | "CHECKOUT_DATE" | "CHECKIN_EARLIEST" | "CHECKIN_LATEST" | "CHECKOUT" | "REFUND" | "STEP_FREE" | "CAPACITY" | "AVAILABLE" | "EXPIRED"; label: string; status: "PASS" | "FAIL" | "UNKNOWN"; privateExplanation: string };
+/** Calendar day (YYYY-MM-DD) of an instant in the given time zone. */
+export function localDay(instant: string, timeZone = "America/New_York") {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(instant));
+}
+export function addDays(day: string, days: number) {
+  const [y, m, d] = day.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+export const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+export const fitsAvailability = (availability: readonly Availability[] | undefined, checkIn: string, checkOut: string) =>
+  !availability?.length || availability.some(range => range.from <= checkIn && checkOut <= range.to);
+
+export type Check = { kind: "BUDGET" | "CHECKIN_DATE_EARLIEST" | "CHECKIN_DATE_LATEST" | "CHECKOUT_DATE" | "CHECKIN_EARLIEST" | "CHECKIN_LATEST" | "CHECKOUT" | "REFUND" | "STEP_FREE" | "CAPACITY" | "AVAILABLE" | "EXPIRED" | "DATES"; label: string; status: "PASS" | "FAIL" | "UNKNOWN"; privateExplanation: string };
 export function checkMember(offer: Offer, constraints: Constraints, contributionCents: number, memberCount: number, now = new Date()): Check[] {
   const cents = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
-  return [
+  const dates: Check[] = constraints.availability?.length ? [(() => {
+    const ok = fitsAvailability(constraints.availability, offer.checkInDate, offer.checkOutDate);
+    return { kind: "DATES" as const, label: "Your dates", status: ok ? "PASS" as const : "FAIL" as const,
+      privateExplanation: ok ? "The stay falls within the dates you said you can travel." : "The stay falls outside the dates you said you can travel." };
+  })()] : [];
+  return [...dates,
     { kind: "BUDGET", label: "Your contribution", status: contributionCents <= constraints.maxContributionCents ? "PASS" : "FAIL", privateExplanation: contributionCents <= constraints.maxContributionCents ? `Your ${cents(contributionCents)} share is within your confirmed maximum.` : `Your ${cents(contributionCents)} share exceeds your confirmed maximum of ${cents(constraints.maxContributionCents)}.` },
     { kind: "CHECKIN_DATE_EARLIEST", label: "Earliest acceptable arrival date", status: !constraints.earliestCheckInDate || offer.checkInDate >= constraints.earliestCheckInDate ? "PASS" : "FAIL", privateExplanation: !constraints.earliestCheckInDate || offer.checkInDate >= constraints.earliestCheckInDate ? "The arrival date is within your availability." : "The arrival date is earlier than your availability." },
     { kind: "CHECKIN_DATE_LATEST", label: "Latest acceptable arrival date", status: !constraints.latestCheckInDate || offer.checkInDate <= constraints.latestCheckInDate ? "PASS" : "FAIL", privateExplanation: !constraints.latestCheckInDate || offer.checkInDate <= constraints.latestCheckInDate ? "The arrival date is within your availability." : "The arrival date is later than your availability." },
@@ -34,8 +51,8 @@ export function assessOffer(offer: Offer, members: readonly { id: string; constr
   return { shares, checks, feasible: members.length > 0 && Object.values(checks).every(items => items.every(item => item.status === "PASS")) };
 }
 
-export type NearMiss = { memberId: string; offerId: string; offerVersion: string; check: "BUDGET" | "REFUND" | "CHECKOUT"; shareCents: number; gapCents?: number };
-const negotiable = new Set<Check["kind"]>(["BUDGET", "REFUND", "CHECKOUT"]);
+export type NearMiss = { memberId: string; offerId: string; offerVersion: string; check: "BUDGET" | "REFUND" | "CHECKOUT" | "DATES"; shareCents: number; gapCents?: number };
+const negotiable = new Set<Check["kind"]>(["BUDGET", "REFUND", "CHECKOUT", "DATES"]);
 
 /**
  * Offers blocked by exactly one member on exactly one check that member could choose to relax.
@@ -59,6 +76,54 @@ export function nearMisses(offers: readonly Offer[], members: readonly { id: str
     if (!previous || candidate.shareCents < previous.shareCents) best.set(memberId, candidate);
   }
   return [...best.values()];
+}
+
+export type DateWindow = { checkIn: string; checkOut: string };
+type Answers = readonly { constraints: Pick<Constraints, "availability" | "nights"> }[];
+
+/** The days worth scanning: everyone's availability together, from tomorrow up to the planning horizon. */
+export function planningSpan(members: Answers, today: string) {
+  const ranges = members.flatMap(member => member.constraints.availability ?? []);
+  if (!ranges.length) return undefined;
+  const first = addDays(today, 1), last = addDays(today, PLANNING_HORIZON_DAYS);
+  const earliest = ranges.map(range => range.from).reduce((a, b) => a < b ? a : b), latest = ranges.map(range => range.to).reduce((a, b) => a > b ? a : b);
+  const span = { earliest: earliest < first ? first : earliest, latest: latest > last ? last : latest };
+  return span.latest > span.earliest ? span : undefined;
+}
+
+/** The trip length most people asked for; a tie goes to the shorter trip. Three nights if nobody said. */
+export function preferredNights(members: Answers) {
+  const counts = new Map<number, number>();
+  for (const member of members) if (member.constraints.nights) counts.set(member.constraints.nights, (counts.get(member.constraints.nights) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 3;
+}
+
+/**
+ * Every trip-length window inside the plan, split into windows everyone can make and windows exactly one
+ * member can't. Members who gave no dates are free throughout. Picks up to `limit` non-overlapping
+ * shared windows, earliest first; near windows name the one member who would need to adjust.
+ */
+export function dateWindows(plan: { earliest: string; latest: string; nights: number }, members: readonly { id: string; constraints: Pick<Constraints, "availability"> }[], limit = 2) {
+  const shared: DateWindow[] = [], near: Array<DateWindow & { memberId: string }> = [];
+  for (let checkIn = plan.earliest; addDays(checkIn, plan.nights) <= plan.latest; checkIn = addDays(checkIn, 1)) {
+    const window = { checkIn, checkOut: addDays(checkIn, plan.nights) };
+    const blocked = members.filter(member => !fitsAvailability(member.constraints.availability, window.checkIn, window.checkOut));
+    if (!blocked.length) shared.push(window);
+    else if (blocked.length === 1 && members.length > 1) near.push({ ...window, memberId: blocked[0]!.id });
+  }
+  const picked: DateWindow[] = [];
+  for (const window of shared) {
+    if (picked.length >= limit) break;
+    if (picked.every(other => window.checkIn >= other.checkOut || window.checkOut <= other.checkIn)) picked.push(window);
+  }
+  const stretch = (window: DateWindow & { memberId: string }) => Math.min(...(members.find(member => member.id === window.memberId)!.constraints.availability ?? [])
+    .map(range => Math.max(0, daysBetween(window.checkIn, range.from)) + Math.max(0, daysBetween(range.to, window.checkOut))));
+  const nearest = new Map<string, DateWindow & { memberId: string }>();
+  for (const window of near) {
+    const best = nearest.get(window.memberId);
+    if (!best || stretch(window) < stretch(best)) nearest.set(window.memberId, window);
+  }
+  return { windows: picked, sharedCount: shared.length, near: [...nearest.values()] };
 }
 
 export function canonicalize(value: unknown): string {

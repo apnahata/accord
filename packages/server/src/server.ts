@@ -3,11 +3,12 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { ConstraintsSchema, ExtractionSchema, MerchantMutationSchema, TripSchema, equalShares } from "@accord/domain";
+import { addDays, AvailabilitySchema, ConstraintsSchema, ExtractionSchema, localDay, MerchantMutationSchema, PLANNING_HORIZON_DAYS, TRIP_STYLES, TripPlanSchema, TripSchema, TripStyleSchema, equalShares } from "@accord/domain";
 import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
 import { AccordState, AppError } from "./state.js";
 import type { AlternativesInput, AutopilotOptions } from "./coordinator.js";
+import type { DestinationsInput } from "./planner.js";
 import { MongoPersistence } from "./persistence.js";
 import { SESSION_TTL_SECONDS } from "./persistence.js";
 import { GoogleHotels, LiteApi } from "./stays.js";
@@ -44,6 +45,18 @@ async function readJson(request: IncomingMessage, max = 32_000): Promise<unknown
 function sessionCookie(value: string, request: IncomingMessage) {
   const secure = request.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
   return `accord_session=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_SECONDS}${secure}`;
+}
+/** Keeps only well-formed answers inside the planning window; the member reviews the draft before anything is saved. */
+function planningAnswers(proposed: z.infer<typeof ExtractionSchema>["proposed"], window: { earliest: string; latest: string }) {
+  const availability = (proposed.availability ?? []).flatMap(range => {
+    const clipped = { from: range.from < window.earliest ? window.earliest : range.from, to: range.to > window.latest ? window.latest : range.to };
+    return AvailabilitySchema.safeParse(clipped).success ? [clipped] : [];
+  });
+  const text = (value?: string, max = 300) => value?.trim().slice(0, max) || undefined;
+  const placeIdeas = text(proposed.placeIdeas), placesToAvoid = text(proposed.placesToAvoid), leavingFrom = text(proposed.leavingFrom, 120);
+  const nights = proposed.nights && proposed.nights >= 1 && proposed.nights <= 14 ? proposed.nights : undefined;
+  return { ...(availability.length ? { availability } : {}), ...(proposed.tripStyles?.length ? { tripStyles: [...new Set(proposed.tripStyles)] } : {}),
+    ...(placeIdeas ? { placeIdeas } : {}), ...(placesToAvoid ? { placesToAvoid } : {}), ...(nights ? { nights } : {}), ...(leavingFrom ? { leavingFrom } : {}) };
 }
 function roomParam(raw: string) {
   try { return decodeURIComponent(raw); } catch { throw new AppError(400, "INVALID_ID"); }
@@ -97,6 +110,16 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           staysChecked: z.number(), staysAvailable: z.number(), staysFailing: z.record(z.string(), z.number()) }).strict(),
         output: z.object({ destinations: z.array(z.string().min(2).max(120)).max(2) }).strict() }, input,
         "A group could not find a shared stay that satisfies everyone's private requirements in the original destination. Suggest up to two nearby alternative destinations in the same country, reachable for the same trip dates, where suitable stays are more likely (for example cheaper nearby cities when many stays failed on budget). Use only the supplied trip facts and anonymous totals. Format each as 'City, ST'. Return an empty list if nothing nearby makes sense.");
+      return result.status === "OK" ? result.value.data.destinations : undefined;
+    },
+    suggestDestinations: async (input: DestinationsInput) => {
+      const window = z.object({ checkIn: z.string(), checkOut: z.string() }).strict();
+      const result = await model.generate({
+        input: z.object({ from: z.array(z.string()), countryCode: z.string(), nights: z.number(), guests: z.number(),
+          windows: z.array(window), styleCounts: z.record(z.string(), z.number()), ideas: z.array(z.string()), avoid: z.array(z.string()) }).strict(),
+        output: z.object({ destinations: z.array(z.object({ name: z.string().min(2).max(120), timeZone: z.string().max(64),
+          styles: z.array(TripStyleSchema).max(TRIP_STYLES.length), why: z.string().max(160) }).strict()).max(5) }).strict() }, input,
+        "A group of friends has not picked a destination yet. Suggest three to five destinations in the given country that best fit the group as a whole, for the given dates and trip length. styleCounts says how many people picked each trip style; favor what most people want but include something for a sizeable minority. ideas are places members would love and avoid are places members ruled out: never suggest anywhere that matches an avoid entry. from lists where members are leaving from, when they said; favor places that are a reasonable trip for most of them, and never suggest a place someone is leaving from, since that is home for them. Prefer places that work in that season (no ski trips without snow, no beach trips in winter cold). Format each name as 'City, ST'. Give its IANA time zone, the trip styles it offers, and one short sentence (max 20 words) about why it suits this group, using only the anonymous totals. No budgets, no names.");
       return result.status === "OK" ? result.value.data.destinations : undefined;
     } } : {}),
   };
@@ -156,15 +179,19 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         const session = state.sessionFromCookie(request.headers.cookie);
         const account = session ? state.users.get(session.userId) : undefined;
         if (!allowAnonymousAccounts && !account?.email) throw new AppError(401, "ACCOUNT_REQUIRED");
+        const roomFields = { name, goal: z.string().trim().max(500).optional(), trip: TripSchema.optional(), plan: TripPlanSchema.optional(), rehearsal: z.boolean().optional() };
         const input = (allowAnonymousAccounts
-          ? z.object({ name, goal: z.string().trim().max(500).optional(), displayName: z.string().trim().min(1).max(60), trip: TripSchema.optional() }).strict()
-          : z.object({ name, goal: z.string().trim().max(500).optional(), trip: TripSchema.optional() }).strict()).parse(body);
+          ? z.object({ ...roomFields, displayName: z.string().trim().min(1).max(60) }).strict()
+          : z.object(roomFields).strict()).parse(body);
+        if (input.trip && input.plan) throw new AppError(422, "VALIDATION_FAILED");
         if (input.trip && Date.parse(input.trip.checkIn) < Date.now() - 86_400_000) throw new AppError(422, "TRIP_IN_PAST");
-        const goal = input.goal || (input.trip ? `A shared stay in ${input.trip.destination} for ${input.trip.guests}, ${input.trip.checkIn} to ${input.trip.checkOut}.` : "");
+        const goal = input.goal || (input.trip ? `A shared stay in ${input.trip.destination} for ${input.trip.guests}, ${input.trip.checkIn} to ${input.trip.checkOut}.`
+          : input.plan ? "A group trip. Accord works out where and when from everyone’s private answers." : "");
         if (!goal) throw new AppError(422, "VALIDATION_FAILED");
         const displayName = account?.displayName ?? ("displayName" in input && typeof input.displayName === "string" ? input.displayName : undefined);
         if (!displayName) throw new AppError(401, "ACCOUNT_REQUIRED");
-        const result = state.createRoom(input.name, goal, displayName, input.trip, session);
+        const result = state.createRoom(input.name, goal, displayName, input.trip, session,
+          input.plan ? { plan: input.plan, rehearsal: input.rehearsal === true || !(liteApiKey || serpApiKey) } : undefined);
         response.setHeader("set-cookie", sessionCookie(result.sessionToken, request));
         await send(201, { roomId: result.roomId, inviteToken: result.inviteToken, ...(inviteUrl(result.inviteToken) ? { inviteUrl: inviteUrl(result.inviteToken) } : {}) }); return;
       }
@@ -213,14 +240,21 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           const { messages } = z.object({ messages: z.array(message).min(1).max(24) }).strict().parse(await readJson(request));
           if (messages.length % 2 !== 1 || messages.some((entry, index) => entry.role !== (index % 2 === 0 ? "user" : "assistant"))) throw new AppError(422, "INVALID_CONVERSATION");
           if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
-          const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), messages: z.array(message) }).strict(), output: ExtractionSchema },
-            { roomGoal: room.goal, timeZone: "America/New_York", messages },
-            "Read the full private stay conversation. Extract an EXPLICIT personal spending maximum into maxContributionCents: $350 means 35000 cents; never omit an explicit maximum and never invent a missing one. All fields except the spending maximum are optional. Never ask about an optional field the member did not mention. If the member says they do not care, have no preference, or any date/time works, omit that field and do not ask again. Date-only availability belongs in earliestCheckInDate, latestCheckInDate, and latestCheckOutDate as YYYY-MM-DD. Never invent a clock time for a date-only statement. Only use earliestCheckInAt, latestCheckInAt, or latestCheckOutAt when the member explicitly states a clock time. A walkable/quiet/near-activities/low-price wish is a soft preference, not an unsupported hard requirement. Only list a hard requirement as unsupported when none of the supported fields can represent it. Ask one concise clarification only when a requirement the member explicitly chose cannot be represented safely without it. Resolve relative dates only from supplied dates; otherwise ask for the calendar date. Express every explicit date/time as the requested WALL CLOCK in America/New_York with a numeric offset, for example 2027-03-14T12:00:00-04:00. NEVER return a Z/UTC timestamp. The latest member answer may revise earlier statements. Phrase money questions in dollars, never cents. Never infer a private reason. This is an unconfirmed draft, never permission to spend.");
+          const today = localDay(new Date().toISOString());
+          const planning = room.plan && !room.trip ? { earliest: addDays(today, 1), latest: addDays(today, PLANNING_HORIZON_DAYS) } : undefined;
+          const planningInstruction = planning
+            ? ` This group has not picked a destination, dates or trip length yet; Accord works them out from everyone's private answers. Today is ${today}. Also extract, only when the member says them: availability as day ranges they can travel (from = earliest day they could leave home, to = latest day they could be back) between ${planning.earliest} and ${planning.latest}, converted from phrases like 'any weekend in March' or 'not the week of the 10th' into explicit ranges; nights as how many nights they'd like the trip to be; leavingFrom as where they'd be leaving from; tripStyles from BEACH, MOUNTAINS, SKI, CITY, NATURE, THEME_PARKS, LAKE; placeIdeas as a short phrase of places they'd love; placesToAvoid as a short phrase of places they ruled out. Dates, trip length, departure, trip styles and places are never unsupported requirements. Never invent any of them.`
+            : "";
+          const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), planning: z.object({ earliest: z.string(), latest: z.string() }).strict().optional(), messages: z.array(message) }).strict(), output: ExtractionSchema },
+            { roomGoal: room.goal, timeZone: "America/New_York", ...(planning ? { planning } : {}), messages },
+            "Read the full private stay conversation. Extract an EXPLICIT personal spending maximum into maxContributionCents: $350 means 35000 cents; never omit an explicit maximum and never invent a missing one. All fields except the spending maximum are optional. Never ask about an optional field the member did not mention. If the member says they do not care, have no preference, or any date/time works, omit that field and do not ask again. Date-only availability belongs in earliestCheckInDate, latestCheckInDate, and latestCheckOutDate as YYYY-MM-DD. Never invent a clock time for a date-only statement. Only use earliestCheckInAt, latestCheckInAt, or latestCheckOutAt when the member explicitly states a clock time. A walkable/quiet/near-activities/low-price wish is a soft preference, not an unsupported hard requirement. Only list a hard requirement as unsupported when none of the supported fields can represent it. Ask one concise clarification only when a requirement the member explicitly chose cannot be represented safely without it. Resolve relative dates only from supplied dates; otherwise ask for the calendar date. Express every explicit date/time as the requested WALL CLOCK in America/New_York with a numeric offset, for example 2027-03-14T12:00:00-04:00. NEVER return a Z/UTC timestamp. The latest member answer may revise earlier statements. Phrase money questions in dollars, never cents. Never infer a private reason. This is an unconfirmed draft, never permission to spend." + planningInstruction);
           if (result.status !== "OK") throw new AppError(503, "AI_UNAVAILABLE");
           const extraction = respectExplicitOptionality(result.value.data, messages.at(-1)!.content);
           const triage = triageExtraction(extraction);
           if (triage.blocking) { await send(200, { stage: "CLARIFYING", reply: triage.blocking }); return; }
           if (extraction.proposed.maxContributionCents === undefined) { await send(200, { stage: "CLARIFYING", reply: "What is the most you would personally contribute to this stay?" }); return; }
+          const tripAnswers = planning && planningAnswers(extraction.proposed, planning);
+          if (tripAnswers && !tripAnswers.availability) { await send(200, { stage: "CLARIFYING", reply: "When could you travel? A rough stretch of dates is fine, like “any time Nov 7–16”." }); return; }
           let earliestCheckInAt: string | undefined, latestCheckInAt: string | undefined, latestCheckOutAt: string | undefined;
           try {
             earliestCheckInAt = extraction.proposed.earliestCheckInAt
@@ -246,6 +280,7 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
             requiresFullCashRefund: extraction.proposed.requiresFullCashRefund ?? false,
             requiresStepFreeAccess: extraction.proposed.requiresStepFreeAccess ?? false,
             softPreference: extraction.proposed.softPreferences?.map(item => item.kind.toLowerCase().replaceAll("_", " ")).join(", ") ?? "",
+            ...tripAnswers,
           });
           const reply = triage.notChecked.length
             ? "I have a draft for you to review. Some of what you mentioned isn't something Accord can check for a stay, so it isn't part of the draft. Nothing has been applied yet."
@@ -258,6 +293,23 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           const input = z.object({ action: z.enum(["ACCEPT", "KEEP"]) }).strict().parse(await readJson(request));
           state.autopilot.respond(room, member.id, roomParam(respondMatch[1]!), input.action);
           await send(200, state.inbox(member)); return;
+        }
+        if (route === "plan/vote" && method === "POST") {
+          const input = z.object({ optionId: z.string().min(1).max(200) }).strict().parse(await readJson(request));
+          await state.autopilot.vote(room, member.id, input.optionId);
+          await send(200, state.roomDTO(room, member.id)); return;
+        }
+        if (route === "plan/reopen" && method === "POST") {
+          z.object({ confirmed: z.literal(true) }).strict().parse(await readJson(request));
+          if (member.id !== room.hostId) throw new AppError(403, "ADMIN_ACCESS_DENIED");
+          state.autopilot.planner.reopen(room);
+          state.autopilot.kick(room, "READY");
+          await send(200, state.roomDTO(room, member.id)); return;
+        }
+        if (route === "solve" && method === "POST" && state.autopilot.planner.needsPlanning(room)) {
+          await readJson(request);
+          await state.autopilot.planNow(room);
+          await send(200, state.roomDTO(room, member.id)); return;
         }
         if (route === "solve" && method === "POST") {
           await readJson(request);

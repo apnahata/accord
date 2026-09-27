@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { addDays, localDay } from "@accord/domain";
 import { createApi } from "../src/server.js";
 import { respectExplicitOptionality } from "../src/intake.js";
 
@@ -68,6 +69,42 @@ test("private multi-turn AI intake asks a functional question and never saves be
   assert.equal(confirmed.status, 200);
   assert.equal(confirmed.data.constraints.maxContributionCents, 35000);
   assert.ok(!JSON.stringify((await call(roomPath, "GET", undefined, cookie)).data).includes("35000"));
+});
+
+test("while a trip is still being planned, the intake asks for dates and picks up trip length and departure", async t => {
+  const day = (offset: number) => addDays(localDay(new Date().toISOString()), offset);
+  const prompts: string[] = [];
+  const app = createApi({
+    geminiApiKey: "test-only",
+    geminiModel: "test-model",
+    geminiFetch: async (_url, init) => {
+      prompts.push(JSON.stringify(JSON.parse(String(init?.body))));
+      return modelResponse(prompts.length === 1
+        ? { proposed: { maxContributionCents: 50000, tripStyles: ["BEACH"] }, privacy: { reasonPrivate: false }, unsupportedHardRequirements: [], ambiguities: [] }
+        : { proposed: { maxContributionCents: 50000, tripStyles: ["BEACH"], availability: [{ from: day(40), to: day(400) }], nights: 4, leavingFrom: "Boston" },
+          privacy: { reasonPrivate: false }, unsupportedHardRequirements: [], ambiguities: [] });
+    },
+  });
+  app.server.listen(0, "127.0.0.1");
+  await once(app.server, "listening");
+  t.after(async () => { app.state.streams.close(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); });
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}/api`;
+  const created = await fetch(base + "/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Trip", displayName: "Alex", plan: {}, rehearsal: true }) });
+  const { roomId } = await created.json() as any;
+  const extract = async (messages: unknown[]) => (await fetch(`${base}/rooms/${roomId}/me/intake/extract`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: created.headers.get("set-cookie")!.split(";")[0]! }, body: JSON.stringify({ messages }),
+  })).json() as Promise<any>;
+
+  const first = [{ role: "user", content: "Up to $500, and I'd love a beach." }];
+  const asked = await extract(first);
+  assert.equal(asked.stage, "CLARIFYING");
+  assert.match(asked.reply, /When could you travel/);
+  assert.match(prompts[0]!, /trip length/);
+  const drafted = await extract([...first, { role: "assistant", content: asked.reply }, { role: "user", content: "Any time after the 40th day from now, about 4 nights, from Boston." }]);
+  assert.equal(drafted.stage, "REVIEW");
+  assert.deepEqual(drafted.constraints.availability, [{ from: day(40), to: day(180) }], "dates past six months are trimmed");
+  assert.equal(drafted.constraints.nights, 4);
+  assert.equal(drafted.constraints.leavingFrom, "Boston");
 });
 
 test("every extractor ambiguity is resolved before review", async t => {

@@ -6,6 +6,7 @@ import { api, ApiError, date, dateTime, money, post, segment } from './api';
 import { PrivateExplanationCard, PublicExplanationCard } from './explanations';
 import { useAction, useResource, useRoomEvents } from './hooks';
 import { AutopilotBanner, Inbox, WatchLine } from './autopilot';
+import { DecidedTrip, PlanningBoard, planSummary } from './planning';
 import type { AnalyticsDTO, ConsentResponseDTO, EventDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO } from './contracts';
 import type { MerchantMutation } from '@accord/domain';
 
@@ -40,16 +41,25 @@ export function Room() {
   const action = useAction();
   const navigate = useNavigate();
   const [invite, setInvite] = useState<string>();
+  const inviteTools = <>
+    <div className="button-row"><Button className="secondary" disabled={action.busy} onClick={() => action.run(async () => { const result = await post<{ inviteToken: string; inviteUrl?: string }>(`${base}/invites`); setInvite(result.inviteUrl ?? `${window.location.origin}/join/${segment(result.inviteToken)}`); })}>Invite friends</Button></div>
+    {invite && <div className="notice"><div><label htmlFor="room-invite">Share this private join link</label><input id="room-invite" value={invite} readOnly onFocus={event => event.target.select()} /></div></div>}
+  </>;
+  const planning = room.data?.planning;
+  const undecided = !!planning && planning.stage !== 'DECIDED';
   const autopilotBusy = ['REPLANNING', 'SEARCHING', 'WIDENING'].includes(room.data?.autopilot?.status ?? '');
+  const heading = room.data?.trip ? `${room.data.trip.destination} · ${date(`${room.data.trip.checkIn}T12:00:00`)} – ${date(`${room.data.trip.checkOut}T12:00:00`)} · ${room.data.trip.guests} guests`
+    : planning ? planSummary(planning) : room.data?.goal;
   return <div className="page">
     <RoomNav roomId={roomId} active="room" />
-    <PageHeading eyebrow="Your next chapter, together" title={room.data?.name || 'Your shared space'} description={room.data?.trip ? `${room.data.trip.destination} · ${date(`${room.data.trip.checkIn}T12:00:00`)} – ${date(`${room.data.trip.checkOut}T12:00:00`)} · ${room.data.trip.guests} guests` : room.data?.goal} aside={<LiveLabel connection={live.connection} />} />
+    <PageHeading eyebrow="Your next chapter, together" title={room.data?.name || 'Your shared space'} description={heading} aside={<LiveLabel connection={live.connection} />} />
     {room.loading && !room.data && <Loading />}<ErrorNotice error={room.error} retry={room.refresh} />
     {room.data && <>
-      <div className="readiness-strip"><span className="icon-circle"><Users size={22} /></span><div><strong>{room.data.readyMemberCount} / {room.data.memberCount} private profiles ready</strong><span>Personal boundaries stay personal. Possibilities are shared.</span></div><Tag>{room.data.status.replaceAll('_', ' ').toLowerCase()}</Tag></div>
+      <div className="readiness-strip"><span className="icon-circle"><Users size={22} /></span><div><strong>{room.data.readyMemberCount} / {room.data.memberCount} private profiles ready</strong><span>Personal boundaries stay personal. Possibilities are shared.</span></div><Tag>{undecided ? 'planning' : room.data.status.replaceAll('_', ' ').toLowerCase()}</Tag></div>
       <AutopilotBanner autopilot={room.data.autopilot} />
       <div className="room-grid"><div className="stack">
-        {room.data.status === 'STALE' ? <Stale changes={proposal.data?.changes}>
+        {planning?.stage === 'DECIDED' && <DecidedTrip room={room.data} base={base} onChange={room.refresh} />}
+        {undecided ? <PlanningBoard room={room.data} base={base} onChange={room.refresh} invite={inviteTools} /> : room.data.status === 'STALE' ? <Stale changes={proposal.data?.changes}>
           {autopilotBusy && <p className="replanning-note"><span className="autopilot-dot" aria-hidden="true" />Accord is already looking for another option. You don’t need to do anything.</p>}
           <Button className={room.data.autopilot?.status === 'REPLANNING' ? 'secondary' : ''} disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`, { replan: true }); room.refresh(); })}>{action.busy ? 'Searching…' : room.data.autopilot?.status === 'REPLANNING' ? 'Search now' : 'Find another option'}<ArrowRight size={17} /></Button>
         </Stale> : room.data.status === 'SEARCHING' ? <section className="panel searching"><span className="orbit" /><p className="eyebrow">Finding your common ground</p><h2>Looking for the shared yes.</h2><p>Accord is checking current stays against everyone’s confirmed requirements.</p><Loading /></section>
@@ -57,10 +67,10 @@ export function Room() {
           : proposal.data && proposal.data.proposal.state !== 'STALE' ? <section className="panel current-proposal"><div className="section-heading"><p className="eyebrow">Your shared possibility</p><Tag>Proposal v{proposal.data.proposal.version}</Tag></div><StayArt city={proposal.data.proposal.offer.city} large /><div className="current-body"><p className="eyebrow"><MapPin size={13} />{proposal.data.proposal.offer.city}</p><h2>{proposal.data.proposal.offer.propertyName}</h2><p>{proposal.data.proposal.offer.roomType}</p><div className="feasibility"><CheckCheck size={18} />{proposal.data.proposal.offer.feasible ? 'Works for everyone’s confirmed requirements' : 'Doesn’t currently satisfy all confirmed requirements'}</div><div className="price-row"><div><strong>{money(proposal.data.proposal.equalShareCents)}</strong><span> / person</span></div><span>{money(proposal.data.proposal.offer.totalCents)} total</span></div><LinkButton to={`/proposals/${segment(proposal.data.proposal.proposalId)}`}>Meet your proposal</LinkButton></div></section>
           : <section className="panel">
             {room.data.autopilot?.status === 'NO_OPTION' ? <Empty title="No shared yes just yet.">Everyone has confirmed, but no current stay works for all of you. Accord is still looking, and anyone can review their own requirements privately.</Empty> : <Empty title="A good plan leaves room for everyone.">Invite your friends, then each confirm your requirements in your own private space.</Empty>}
-            <div className="button-row"><LinkButton to={`${base}/me/intake`}>Set my boundaries</LinkButton><Button className="secondary" disabled={action.busy} onClick={() => action.run(async () => { const result = await post<{ inviteToken: string; inviteUrl?: string }>(`${base}/invites`); setInvite(result.inviteUrl ?? `${window.location.origin}/join/${segment(result.inviteToken)}`); })}>Invite friends</Button></div>
-            {invite && <div className="notice"><div><label htmlFor="room-invite">Share this private join link</label><input id="room-invite" value={invite} readOnly onFocus={event => event.target.select()} /></div></div>}
-            <hr /><Button className="secondary" disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`); room.refresh(); navigate(`${base}/offers`); })}>{action.busy ? 'Searching…' : 'Search now'} <ArrowRight size={16} /></Button>
-            <p className="fine">{room.data.trip ? 'Once everyone has confirmed, Accord searches Nuitée Connect on its own and proposes the best shared fit.' : 'Once everyone has confirmed, Accord searches on its own and proposes the best shared fit.'}</p>
+            <div className="button-row"><LinkButton to={`${base}/me/intake`}>Set my boundaries</LinkButton></div>
+            {inviteTools}
+            <hr /><Button className="secondary" disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`); room.refresh(); navigate(`${base}/offers`); })}>{action.busy ? (room.data.trip && !planning?.rehearsal ? 'Searching…' : 'Finding stays…') : 'Search now'} <ArrowRight size={16} /></Button>
+            <p className="fine">{room.data.trip && !planning?.rehearsal ? 'Once everyone has confirmed, Accord searches Nuitée Connect on its own and proposes the best shared fit.' : 'Once everyone has confirmed, Accord searches on its own and proposes the best shared fit.'}</p>
           </section>}
         <ErrorNotice error={proposal.error} retry={proposal.refresh} /><ErrorNotice error={action.error} />
         <Link to={`${base}/offers`} className="explore-link"><span><strong>A little more room to explore</strong><small>Compare stays and see how Accord found your common ground.</small></span><ArrowRight size={22} /></Link>

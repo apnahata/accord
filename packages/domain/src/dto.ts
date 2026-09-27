@@ -1,5 +1,5 @@
 /** Server-owned wire contracts. Public DTOs contain public fields only. */
-import type { Constraints, Trip } from "./schemas.js";
+import type { Constraints, Trip, TripPlan, TripStyle } from "./schemas.js";
 export type PublicRoomDTO = {
   id: string; name: string; goal: string;
   status: 'COLLECTING' | 'SEARCHING' | 'PROPOSAL_ACTIVE' | 'STALE' | 'BOOKED';
@@ -12,16 +12,46 @@ export type PublicRoomDTO = {
   lastSearch?: { searchedAt: string; providers: Array<{ provider: string; status: string; count: number }> };
   /** What Accord's coordinator is doing on its own right now. Public-safe; never names a blocking member. */
   autopilot: AutopilotDTO;
+  /** Present when the group asked Accord to help decide where and when. */
+  planning?: PlanningDTO;
 };
 export type AutopilotDTO = {
-  status: 'IDLE' | 'WAITING_FOR_MEMBERS' | 'SEARCHING' | 'REPLANNING' | 'WIDENING' | 'WATCHING' | 'NO_OPTION';
+  status: 'IDLE' | 'WAITING_FOR_MEMBERS' | 'SEARCHING' | 'REPLANNING' | 'WIDENING' | 'WATCHING' | 'NO_OPTION' | 'PLANNING' | 'VOTING';
   message: string;
+};
+export type TripOptionDTO = {
+  id: string; destination: string; checkIn: string; checkOut: string; nights: number;
+  propertyName: string; totalCents: number; equalShareCents: number; imageUrl?: string;
+  /** Public-safe reasons: anonymous totals and facts about the stay, never a member's answer. */
+  why: string[];
+  /** Only revealed once voting closes. */
+  votes?: number;
+};
+/** Everything here is an anonymous total across members or something Accord worked out from them. */
+export type PlanningDTO = {
+  plan: TripPlan;
+  /** Days members can say they're free on. */
+  horizon: { earliest: string; latest: string };
+  stage: 'COLLECTING' | 'PLANNING' | 'VOTING' | 'DECIDED' | 'NO_OPTION';
+  message?: string;
+  answered: number; total: number;
+  /** How many members picked each style; hidden until at least two people have answered. */
+  styles: Array<{ style: TripStyle; count: number }>;
+  windows: Array<{ checkIn: string; checkOut: string }>;
+  destinations: Array<{ name: string; why: string }>;
+  options: TripOptionDTO[];
+  votesCast: number; myVoteOptionId?: string; voteClosesAt?: string;
+  decidedOptionId?: string; decidedBy?: 'VOTE' | 'ONLY_OPTION' | 'DEADLINE';
+  /** Demo planning uses Accord's generated rehearsal stays instead of live providers. */
+  rehearsal: boolean;
 };
 export type StayResearchDTO = { sourceLabel: string; pros: string[]; cons: string[]; nearby: string[]; summary?: string };
 export type PublicOfferDTO = {
   offerId: string; offerVersion: string; merchantName: string; propertyName: string;
   city: string; roomType: string; checkInDate: string; checkOutDate: string; checkInAt: string; checkOutAt: string;
   checkInTimeKnown: boolean; checkOutTimeKnown: boolean;
+  /** IANA zone of the stay; check-in and check-out times are shown in it. */
+  timeZone: string;
   guestCapacity: number; stepFreeVerified: boolean | null; cancellationLabel: string;
   subtotalCents: number; mandatoryFeesCents: number; totalCents: number;
   equalShareCents: number; available: boolean; expiresAt: string; feasible: boolean;
@@ -65,7 +95,7 @@ export type ConsentResponseDTO = {
   proposalId: string; version: number; proposalHash: string; approvalStatus: 'APPROVED';
   paymentAuthorizationStatus: 'PENDING' | 'AUTHORIZED' | 'CAPTURED'; amountCents: number;
 };
-export type { Constraints } from "./schemas.js";
+export type { Constraints, TripPlan, TripStyle, Availability } from "./schemas.js";
 export type CapsuleDTO = { displayName: string; constraints: Constraints | null; confirmedAt?: string };
 export type Capabilities = {
   ai: { available: boolean }; elevenLabs: { available: boolean };
@@ -77,9 +107,9 @@ export type EventDTO = { id: string; occurredAt: string; title: string; detail?:
 /** Private to one member. Only that member's own limits may appear in title/body. */
 export type InboxMessageDTO = {
   id: string; at: string;
-  kind: 'STALE_REASON' | 'NUDGE' | 'REMINDER' | 'READY_TO_BOOK' | 'EXPIRING' | 'INFO';
+  kind: 'STALE_REASON' | 'NUDGE' | 'REMINDER' | 'READY_TO_BOOK' | 'EXPIRING' | 'INFO' | 'VOTE';
   title: string; body: string; proposalId?: string;
-  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT'; acceptLabel: string; keepLabel: string };
+  nudge?: { status: 'OPEN' | 'ACCEPTED' | 'KEPT' | 'EXPIRED'; check: 'BUDGET' | 'REFUND' | 'CHECKOUT' | 'DATES'; acceptLabel: string; keepLabel: string };
 };
 export type InboxDTO = { messages: InboxMessageDTO[] };
 export type PublicChange = { label: string; before: string; after: string };

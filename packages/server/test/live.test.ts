@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createApi } from "../src/server.js";
-import { LiteApi, localToInstant } from "../src/stays.js";
+import { GoogleHotels, LiteApi, localToInstant } from "../src/stays.js";
 import type { PaymentGateway } from "../src/payments.js";
 
 // Provider responses are controlled here; the live APIs are exercised manually, not in CI.
@@ -89,6 +89,17 @@ test("LiteAPI production or unrecognized keys cannot enter the sandbox booking f
   assert.throws(() => new LiteApi("unknown_example"), /LITEAPI_SANDBOX_KEY_REQUIRED/);
   assert.doesNotThrow(() => new LiteApi("sand_example"));
   assert.doesNotThrow(() => new LiteApi("sandbox_example"));
+});
+
+test("the same hotel or rental on different dates is a different offer", async () => {
+  const { fetcher } = providers();
+  const on = (offset: number) => ({ ...trip, checkIn: day(offset), checkOut: day(offset + 3), countryCode: "US", timeZone: "America/New_York" });
+  for (const client of [new LiteApi("sand_test", fetcher), new GoogleHotels("test", fetcher)]) {
+    const [first, second] = [await client.search(on(60)), await client.search(on(61))];
+    assert.ok(first.length && first.length === second.length);
+    assert.ok(first.every(({ offer }) => !second.some(other => other.offer.offerId === offer.offerId)), "a second date window must not overwrite the first");
+    assert.deepEqual((await client.search(on(60))).map(stay => stay.offer.offerId), first.map(stay => stay.offer.offerId));
+  }
 });
 
 test("live search: real-provider offers are checked privately and booked through the LiteAPI sandbox", async t => {

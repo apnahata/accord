@@ -51,6 +51,9 @@ const codeCopy: Record<string, string> = {
   ADMIN_ACCESS_DENIED: 'Only the group host can do that.',
   PROPOSAL_STALE: 'Something changed since this was approved: the price, the terms, or the group. Previous approvals can’t be used. Review the latest state.',
   STAY_SEARCH_UNAVAILABLE: 'Live stay search isn’t configured on this server.',
+  VOTING_CLOSED: 'Voting has closed or the group changed. Refresh to see the latest plan.',
+  OPTION_NOT_FOUND: 'That trip is no longer on the shortlist. Refresh to see the latest plan.',
+  TRIP_NOT_DECIDED: 'The group hasn’t picked where and when yet.',
   STAY_SEARCH_FAILED: 'The live stay providers didn’t respond. Please try again in a moment.',
   BOOKING_PROVIDER_UNAVAILABLE: 'The booking provider couldn’t be reached, so nothing was booked. Please try again.',
   PAYMENT_PROVIDER_UNAVAILABLE: 'CyberSource sandbox is not configured. Add the merchant ID, key ID, shared secret, and sandbox card settings, then try again.',
@@ -59,6 +62,7 @@ const codeCopy: Record<string, string> = {
   HOST_CANNOT_LEAVE: 'The host can’t leave the group.',
   ALREADY_BOOKED: 'This group has already booked.',
   TRIP_IN_PAST: 'Choose trip dates in the future.',
+  DATES_REQUIRED: 'Add at least one stretch of dates you could travel. Accord plans the trip around everyone’s dates.',
   NUDGE_NOT_FOUND: 'This message is no longer available.',
   NUDGE_CLOSED: 'You already answered this, or your requirements changed since. Nothing else was changed.',
   AI_UNAVAILABLE: 'Gemini is unavailable right now. Accord’s verified checks still work; you can use the form or try again later.',
@@ -90,9 +94,9 @@ export function post<T>(path: string, body: unknown = {}, headers?: HeadersInit)
 }
 export const segment = (value: string) => encodeURIComponent(value);
 export const money = (cents: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: cents % 100 ? 2 : 0 }).format(cents / 100);
-export const date = (value: string) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }).format(new Date(value));
+export const date = (value: string, timeZone = 'America/New_York') => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone }).format(new Date(value));
 export const calendarDate = (value: string) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(`${value}T12:00:00`));
-export const dateTime = (value: string) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' }).format(new Date(value));
+export const dateTime = (value: string, timeZone = 'America/New_York') => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone, timeZoneName: 'short' }).format(new Date(value));
 export function safeExplorer(url?: string) {
   if (!url) return undefined;
   try { const parsed = new URL(url); return parsed.protocol === 'https:' && parsed.hostname === 'explorer.solana.com' && parsed.pathname.startsWith('/tx/') && parsed.searchParams.get('cluster') === 'devnet' ? parsed.href : undefined; } catch { return undefined; }

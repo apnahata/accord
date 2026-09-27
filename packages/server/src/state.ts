@@ -6,8 +6,10 @@ import {
   type Constraints, type MerchantEvent, type MerchantMutation, type Offer,
   type PublicRoomDTO, type PublicOfferDTO, type PublicProposalDTO, type ProposalEnvelope,
   type PrivateProposalDTO, type PrivateProposalEnvelope, type OffersDTO, type ReceiptDTO, type AccountDTO, type EventDTO, type PublicChange, type Trip,
-  type InboxDTO, type InboxMessageDTO, type NearMiss,
+  type InboxDTO, type InboxMessageDTO, type NearMiss, type TripPlan, type DateWindow,
 } from "@accord/domain";
+import { demoStays } from "./demo-stays.js";
+import type { DestinationIdea, DestinationsInput, Planning } from "./planner.js";
 import { Merchant, type MerchantContract } from "../../integrations/src/merchant.js";
 import { RoomStreams } from "../../integrations/src/realtime.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
@@ -23,9 +25,11 @@ export { AppError };
 /** Private to one member; sealed at rest with their constraints. */
 export type InboxEntry = {
   id: string; at: string; kind: InboxMessageDTO["kind"]; title: string; body: string; proposalId?: string;
-  nudge?: { status: "OPEN" | "ACCEPTED" | "KEPT" | "EXPIRED"; check: NearMiss["check"]; offerId: string; offerVersion: string; shareCents: number; checkOutAt?: string };
+  nudge?: { status: "OPEN" | "ACCEPTED" | "KEPT" | "EXPIRED"; check: NearMiss["check"]; offerId?: string; offerVersion?: string; shareCents: number; checkOutAt?: string;
+    /** DATES nudges: the exact trip days the member is asked to make. */
+    window?: DateWindow };
 };
-type Member = { id: string; userId: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number; inbox?: InboxEntry[] };
+export type Member = { id: string; userId: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number; inbox?: InboxEntry[] };
 type User = { id: string; displayName: string; createdAt: string; email?: string; passwordSalt?: string; passwordHash?: string };
 type Approval = { proposalHash: string; status: "APPROVED" | "INVALIDATED"; approvedAt: string };
 type Authorization = { proposalHash: string; amountCents: number; status: "AUTHORIZED" | "INVALIDATED" | "CAPTURED" | "RELEASED" | "FAILED"; providerRef: string; captureRef?: string; reversalRef?: string };
@@ -60,10 +64,14 @@ export type StayProviders = {
   pulse?: Pulse;
   /** Advisory only: proposes nearby destinations to search. Accord's checks still decide feasibility. */
   suggestAlternatives?: (input: AlternativesInput) => Promise<string[] | undefined>;
+  /** Advisory only: proposes destinations from anonymous planning totals. */
+  suggestDestinations?: (input: DestinationsInput) => Promise<DestinationIdea[] | undefined>;
 };
 const GOOGLE_CACHE_MS = 30 * 60 * 1000;
 const GROUP_PAYMENT_KEY = "__shared_group_payment__";
 const money = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
+const shortDay = (day: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(`${day}T12:00:00Z`));
+export const dayRange = (window: DateWindow) => `${shortDay(window.checkIn)}–${shortDay(window.checkOut)}`;
 const cancellationLabel = (offer: Offer) => offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "Full cash refund" : offer.cancellationPolicyCode === "TRAVEL_CREDIT" ? "Travel credit only" : "Non-refundable";
 const sourceLabel = (offer: Offer) => offer.source === "LITEAPI" ? "Nuitée Connect hotel · bookable in sandbox" : offer.source === "GOOGLE_HOTELS" ? `Google Hotels · book on ${offer.merchantName}` : "Demo inventory";
 export type Room = {
@@ -74,7 +82,13 @@ export type Room = {
   /** Set when Accord found nothing for this exact set of requirements and offers; public-safe message only. */
   noOption?: { fingerprint: string; message: string };
   widenedFor?: string;
+  /** Set when the group asked Accord to decide where and when. `trip` appears once they have. */
+  plan?: TripPlan; planning?: Planning;
+  /** Stays come from Accord's generated rehearsal inventory rather than live providers. */
+  rehearsal?: boolean;
 };
+/** Rooms with a trip search live providers, unless they plan with rehearsal stays. */
+export const isLive = (room: Room) => !!room.trip && !room.rehearsal;
 
 const merchantContract: MerchantContract<Offer, MerchantMutation, MerchantEvent> = {
   offer: OfferSchema, mutation: MerchantMutationSchema, event: MerchantEventSchema,
@@ -179,11 +193,12 @@ export class AccordState {
     this.#addSession(hashToken(sessionToken), user.id, membership?.roomId, membership?.id);
     return { sessionToken, account: this.accountDTO(this.sessions.get(hashToken(sessionToken))!) };
   }
-  createRoom(name: string, goal: string, displayName: string, trip?: Trip, existing?: SessionRecord) {
+  createRoom(name: string, goal: string, displayName: string, trip?: Trip, existing?: SessionRecord, planning?: { plan: TripPlan; rehearsal: boolean }) {
     const roomId = randomUUID(), memberId = randomUUID(), inviteToken = token(), sessionToken = token();
     const userId = existing?.userId ?? randomUUID();
     if (!this.users.has(userId)) { this.users.set(userId, { id: userId, displayName, createdAt: nowIso() }); this.#dirtyUsers.add(userId); }
-    const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [], ...(trip ? { trip } : {}) };
+    const room: Room = { id: roomId, name, goal, inviteToken, hostId: memberId, memberIds: [memberId], createdAt: nowIso(), version: 0, events: [], ...(trip ? { trip } : {}),
+      ...(planning ? { plan: planning.plan, ...(planning.rehearsal ? { rehearsal: true } : {}) } : {}) };
     this.rooms.set(roomId, room); this.#addInvitation(hashToken(inviteToken), roomId);
     this.members.set(memberId, { id: memberId, userId, roomId, displayName, constraints: null, capsuleVersion: 0 });
     this.#addSession(hashToken(sessionToken), userId, roomId, memberId);
@@ -235,7 +250,8 @@ export class AccordState {
       viewerIsHost: viewerId === room.hostId,
       ...(room.trip ? { trip: room.trip } : {}),
       ...(room.search ? { lastSearch: { searchedAt: room.search.searchedAt, providers: room.search.providers.map(({ provider, status, count }) => ({ provider, status, count })) } } : {}),
-      autopilot: this.autopilot.describe(room) };
+      autopilot: this.autopilot.describe(room),
+      ...(room.plan ? { planning: this.autopilot.planner.dto(room, viewerId) } : {}) };
   }
   /** Host-only. Only members who have not confirmed requirements can be removed; their sessions are revoked. */
   removeMember(room: Room, host: Member, memberId: string) {
@@ -271,6 +287,8 @@ export class AccordState {
     this.autopilot.kick(room, "READY");
   }
   confirmConstraints(room: Room, member: Member, constraints: Constraints) {
+    // The group's dates come only from members' answers, so a trip still being planned needs everyone's.
+    if (room.plan && !room.trip && !constraints.availability?.length) throw new AppError(422, "DATES_REQUIRED");
     member.constraints = structuredClone(constraints); member.capsuleVersion++; member.confirmedAt = nowIso();
     for (const entry of member.inbox ?? []) if (entry.nudge?.status === "OPEN") entry.nudge.status = "EXPIRED";
     this.stale(room, "Confirmed requirements changed.");
@@ -297,10 +315,12 @@ export class AccordState {
       const nudge = entry.nudge!;
       if (nudge.check === "BUDGET") return { acceptLabel: `Raise my limit to ${money(nudge.shareCents)}`, keepLabel: "Keep my limit" };
       if (nudge.check === "REFUND") return { acceptLabel: "Drop the refund requirement for this trip", keepLabel: "Keep requiring a full refund" };
+      if (nudge.check === "DATES") return { acceptLabel: nudge.window ? `I can make ${dayRange(nudge.window)}` : "I can make these dates", keepLabel: "Keep my dates" };
       return { acceptLabel: "Accept this checkout time", keepLabel: "Keep my checkout time" };
     };
     // Calls to action about a proposal that is no longer open would point people at a dead offer.
     const superseded = (entry: InboxEntry) => {
+      if (entry.kind === "VOTE") return this.rooms.get(member.roomId)?.planning?.stage !== "VOTING" || entry !== member.inbox?.findLast(item => item.kind === "VOTE");
       if (!entry.proposalId || !(entry.kind === "READY_TO_BOOK" || entry.kind === "REMINDER" || entry.kind === "EXPIRING")) return false;
       const proposal = this.proposals.get(entry.proposalId);
       if (entry.kind === "REMINDER") return proposal?.state !== "OPEN" || proposal.approvals.get(member.id)?.status === "APPROVED";
@@ -405,8 +425,51 @@ export class AccordState {
     await this.ready;
     return this.store.transaction(async tx => { const offer = (await tx.getOffer(id))?.offer; return offer ? compatibleOffer(offer) : undefined; });
   }
-  /** Rooms with trip details use their live search results; legacy rooms use the controlled demo catalog. */
-  offerIdsFor(room: Room) { return room.trip ? room.search?.offerIds ?? [] : this.catalogIds; }
+  /** Rooms with trip details or a plan use their own search results; legacy rooms use the controlled demo catalog. */
+  offerIdsFor(room: Room) { return room.trip || room.plan ? room.search?.offerIds ?? [] : this.catalogIds; }
+  /**
+   * Searches several candidate trips at once for planning and replaces the room's results with all of them.
+   * Rehearsal rooms get generated stays; live rooms query each configured provider per candidate.
+   */
+  async searchCandidates(room: Room, trips: Trip[]) {
+    const byTrip: string[][] = [];
+    const research: Record<string, StayResearch> = {}, refs: Record<string, LiteRef | ExternalRef> = {};
+    const totals = new Map<ProviderResult["provider"], ProviderResult>();
+    room.searching = true;
+    try {
+      for (const trip of trips) {
+        let offers: Offer[];
+        if (room.rehearsal) offers = demoStays(trip);
+        else {
+          const { liteApi, google } = this.providers;
+          if (!liteApi && !google) throw new AppError(503, "STAY_SEARCH_UNAVAILABLE");
+          const stays: LiveStay[] = [];
+          for (const [provider, client] of [["LITEAPI", liteApi], ["GOOGLE_HOTELS", google]] as const) {
+            const total = totals.get(provider) ?? { provider, status: client ? "OK" : "UNCONFIGURED", count: 0 };
+            if (client) {
+              try { const found = await client.search(trip); stays.push(...found); total.count += found.length; }
+              catch (error) { if (!total.count) Object.assign(total, { status: "FAILED", detail: String((error as Error).message).slice(0, 160) }); }
+            }
+            totals.set(provider, total);
+          }
+          for (const stay of stays) { research[stay.offer.offerId] = stay.research; refs[stay.offer.offerId] = stay.ref; }
+          offers = stays.map(stay => stay.offer);
+        }
+        // A regenerated rehearsal stay must not undo a merchant change made from the simulator.
+        await this.#upsertLive(offers, { keepExisting: room.rehearsal });
+        byTrip.push(offers.map(offer => offer.offerId));
+      }
+      room.search = { searchedAt: nowIso(), offerIds: [...new Set(byTrip.flat())], research, refs,
+        providers: room.rehearsal ? [] : [...totals.values()], destinations: [...new Set(trips.map(trip => trip.destination))] };
+      return byTrip;
+    } finally { room.searching = false; this.#dirtyRooms.add(room.id); }
+  }
+  /** Ranks feasible offers for these members, best first, using the same scoring as a normal search. */
+  async rankFeasible(offers: Offer[], members: Array<Member & { constraints: Constraints }>) {
+    const feasible = offers.filter(offer => assessOffer(offer, members).feasible);
+    const minTotal = feasible.length ? Math.min(...feasible.map(offer => offer.totalCents)) : 0;
+    return feasible.sort((a, b) => this.score(b, members, minTotal) - this.score(a, members, minTotal) || a.totalCents - b.totalCents);
+  }
   async allOffers(ids: readonly string[] = this.catalogIds): Promise<Offer[]> {
     await this.ready;
     // Sequential: Mongo transactions do not support concurrent operations on one session.
@@ -470,13 +533,13 @@ export class AccordState {
       }
     } finally { room.searching = false; this.#dirtyRooms.add(room.id); }
   }
-  async #upsertLive(offers: Offer[]) {
+  async #upsertLive(offers: Offer[], options: { keepExisting?: boolean } = {}) {
     await this.store.transaction(async tx => {
       for (const offer of offers) {
         const existingRaw = await tx.getOffer(offer.offerId);
         const existing = existingRaw ? { ...existingRaw, offer: compatibleOffer(existingRaw.offer), original: compatibleOffer(existingRaw.original) } : undefined;
         if (!existing) { await tx.putOffer(offer.offerId, { offer, original: structuredClone(offer), failNextBooking: false, booked: false }); continue; }
-        if (existing.booked) continue;
+        if (existing.booked || options.keepExisting) continue;
         const candidate = { ...offer, offerVersion: existing.offer.offerVersion, expiresAt: existing.offer.expiresAt };
         const next = materialOfferEquals(candidate, existing.offer)
           ? { ...existing.offer, expiresAt: offer.expiresAt, imageUrl: offer.imageUrl, rating: offer.rating, reviewCount: offer.reviewCount }
@@ -515,6 +578,7 @@ export class AccordState {
       checkInDate: offer.checkInDate, checkOutDate: offer.checkOutDate,
       checkInAt: offer.checkInAt, checkOutAt: offer.checkOutAt,
       checkInTimeKnown: offer.checkInTimeKnown, checkOutTimeKnown: offer.checkOutTimeKnown, guestCapacity: offer.guestCapacity,
+      timeZone: room.planning?.offerZones?.[offer.offerId] ?? room.trip?.timeZone ?? "America/New_York",
       stepFreeVerified: offer.stepFreeVerified,
       cancellationLabel: offer.cancellationPolicyCode === "FULL_CASH_REFUND" ? "Full cash refund" : offer.cancellationPolicyCode === "TRAVEL_CREDIT" ? "Travel credit only" : "Non-refundable",
       subtotalCents: offer.subtotalCents, mandatoryFeesCents: offer.mandatoryFeesCents, totalCents: offer.totalCents,
@@ -526,18 +590,21 @@ export class AccordState {
       ...(offer.externalUrl ? { externalUrl: offer.externalUrl } : {}),
       ...(room.search?.research[offer.offerId] ? { research: room.search.research[offer.offerId] } : {}) };
   }
+  inventoryLabel(room: Room) {
+    return room.rehearsal ? "Accord rehearsal stays — generated for your destination and dates; no real accommodation is reserved" : inventoryLabel;
+  }
   async offers(room: Room): Promise<OffersDTO> {
     const members = this.confirmed(room), offers = await this.allOffers(this.offerIdsFor(room));
     const assessments = offers.map(offer => ({ offer, assessed: assessOffer(offer, members) }));
     const feasible = assessments.filter(item => item.assessed.feasible);
     // Google Hotels results remain useful comparisons, but only provider-bookable inventory can become an executable proposal.
-    const proposalCandidates = room.trip ? feasible.filter(item => item.offer.source === "LITEAPI") : feasible;
+    const proposalCandidates = isLive(room) ? feasible.filter(item => item.offer.source === "LITEAPI") : feasible;
     const minTotal = proposalCandidates.length ? Math.min(...proposalCandidates.map(item => item.offer.totalCents)) : 0;
     const ranked = [...proposalCandidates].sort((a, b) => this.score(b.offer, members, minTotal) - this.score(a.offer, members, minTotal) || a.offer.totalCents - b.offer.totalCents);
     const recommended = ranked[0]?.offer;
     const rank = new Map(ranked.map((item, index) => [item.offer.offerId, index]));
     const ordered = [...assessments].sort((a, b) => (rank.get(a.offer.offerId) ?? 1e6) - (rank.get(b.offer.offerId) ?? 1e6) || a.offer.totalCents - b.offer.totalCents);
-    const live = !!room.trip;
+    const live = isLive(room);
     const reasons = !recommended ? [] : [
       "Meets every confirmed requirement.",
       ...(live ? [`Real listing: ${sourceLabel(recommended)}.`] : []),
@@ -550,7 +617,7 @@ export class AccordState {
       pulse.stability(room.trip!, ordered.map(item => item.offer.offerId)).catch(() => undefined),
       new Promise<undefined>(resolve => setTimeout(resolve, 1500)),
     ]) : undefined;
-    return { inventoryLabel: live ? `Live results: Nuitée Connect hotels (sandbox booking)${this.providers.google ? " and Google Hotels vacation rentals via SerpApi" : ""}${room.search ? ` · searched ${new Date(room.search.searchedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: room.trip!.timeZone })}` : " · not searched yet"}` : inventoryLabel,
+    return { inventoryLabel: live ? `Live results: Nuitée Connect hotels (sandbox booking)${this.providers.google ? " and Google Hotels vacation rentals via SerpApi" : ""}${room.search ? ` · searched ${new Date(room.search.searchedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: room.trip!.timeZone })}` : " · not searched yet"}` : this.inventoryLabel(room),
       offers: ordered.map(item => { const dto = this.offerDTO(item.offer, room, item.assessed.feasible), observed = stability?.get(item.offer.offerId); return observed ? { ...dto, stability: observed } : dto; }),
       recommendedOfferId: recommended?.offerId, recommendationReasons: reasons,
       providerResults: room.search?.providers.map(({ provider, status, count, detail }) => ({ provider, status, count, ...(detail ? { detail } : {}) })) ?? [],
@@ -567,8 +634,9 @@ export class AccordState {
   }
   async #solve(room: Room, trigger: "MANUAL" | "READY" | "REPLAN" | "WIDEN", options: { search?: boolean }): Promise<ProposalEnvelope | { noSolution: true }> {
     const members = this.confirmed(room);
-    if (room.trip && options.search !== false) await this.searchLive(room);
-    else this.emit(room, "SOLVE_STARTED", room.trip ? "Accord started replanning from the current observed stays." : trigger === "REPLAN" ? "Accord is re-checking every demo stay against everyone’s confirmed requirements." : "Accord started checking current demo stays.", undefined, { actor: "ACCORD" });
+    if (room.plan && !room.trip) throw new AppError(409, "TRIP_NOT_DECIDED");
+    if (isLive(room) && options.search !== false) await this.searchLive(room);
+    else this.emit(room, "SOLVE_STARTED", isLive(room) ? "Accord started replanning from the current observed stays." : trigger === "REPLAN" ? "Accord is re-checking every demo stay against everyone’s confirmed requirements." : "Accord started checking current demo stays.", undefined, { actor: "ACCORD" });
     const data = await this.offers(room);
     if (!data.recommendedOfferId) { this.emit(room, "SOLVE_COMPLETED", "No current stay satisfies every confirmed requirement.", undefined, { actor: "ACCORD", detail: `Checked ${data.offers.length} stays.` }); return { noSolution: true }; }
     const offer = (await this.currentOffer(data.recommendedOfferId))!;
@@ -584,8 +652,8 @@ export class AccordState {
     this.proposals.set(id, proposal); room.activeProposalId = id;
     const suitable = data.offers.filter(item => item.feasible).length;
     const share = money(Math.ceil(offer.totalCents / room.memberIds.length));
-    this.emit(room, "SOLVE_COMPLETED", `${suitable} of ${data.offers.length} ${room.trip ? "live" : "demo"} stays meet every confirmed requirement.`, undefined, { actor: "ACCORD" });
-    if (room.trip) void this.#summarize(room, data.offers.filter(item => item.feasible).slice(0, 3).map(item => item.offerId));
+    this.emit(room, "SOLVE_COMPLETED", `${suitable} of ${data.offers.length} ${isLive(room) ? "live" : "demo"} stays meet every confirmed requirement.`, undefined, { actor: "ACCORD" });
+    if (isLive(room)) void this.#summarize(room, data.offers.filter(item => item.feasible).slice(0, 3).map(item => item.offerId));
     const title = trigger === "REPLAN" || trigger === "WIDEN"
       ? `Accord found a new option: ${offer.propertyName} in ${offer.city}, ${share} each. Proposal v${version} needs everyone’s fresh approval.`
       : `Accord proposed ${offer.propertyName} in ${offer.city}: ${share} each (Proposal v${version}).`;
@@ -619,7 +687,7 @@ export class AccordState {
       bookingModeLabel: offer.source === "LITEAPI" ? "Automatic Nuitée Connect sandbox reservation with CyberSource sandbox payment"
         : offer.source === "GOOGLE_HOTELS" ? `Approved listing — the host completes the purchase on ${offer.merchantName}`
         : "Controlled demo merchant booking — no real accommodation reserved",
-      inventoryLabel: room.trip ? "Live provider inventory" : inventoryLabel,
+      inventoryLabel: isLive(room) ? "Live provider inventory" : this.inventoryLabel(room),
       canExecute: proposal.state === "READY_TO_EXECUTE" };
   }
   async privateProposal(proposal: Proposal, member: Member): Promise<PrivateProposalEnvelope> {
@@ -978,9 +1046,10 @@ export class AccordState {
   }
   #aggregate(room: Room): RoomAggregate {
     const sealer = this.persistence!.sealer;
-    const { id, events, ...rest } = room;
+    const { id, events, planning, ...rest } = room;
+    const sealedPlanning = planning && { ...structuredClone(planning), votes: {}, sealedVotes: sealer.seal(planning.votes) };
     return {
-      room: { _id: id, ...structuredClone(rest), events: events.slice(-200) },
+      room: { _id: id, ...structuredClone(rest), ...(sealedPlanning ? { planning: sealedPlanning } : {}), events: events.slice(-200) },
       users: [...new Set(room.memberIds.map(memberId => this.members.get(memberId)!.userId))].map(userId => {
         const { id: _id, ...fields } = this.users.get(userId)!;
         return { _id, ...fields };
@@ -1019,8 +1088,10 @@ export class AccordState {
     const sealer = this.persistence!.sealer;
     const data = await this.persistence!.load();
     for (const doc of data.rooms) {
-      const { _id, ...rest } = doc;
-      this.rooms.set(String(_id), { ...(rest as Omit<Room, "id">), id: String(_id), searching: false });
+      const { _id, planning, ...rest } = doc;
+      const { sealedVotes, ...plan } = planning ?? {};
+      this.rooms.set(String(_id), { ...(rest as Omit<Room, "id">), id: String(_id), searching: false,
+        ...(planning ? { planning: { ...plan, votes: sealedVotes ? sealer.open<Record<string, string>>(sealedVotes as SealedValue) : {} } as NonNullable<Room["planning"]> } : {}) });
     }
     for (const doc of data.users) {
       const { _id, ...rest } = doc;

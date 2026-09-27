@@ -6,7 +6,7 @@ import type { PriceObservation } from "./pulse.js";
 export type Fetch = typeof fetch;
 /** Receives every public price a provider returned (all rates, not only the ones Accord keeps). */
 export type Observe = (rows: PriceObservation[]) => void;
-const liteOfferId = (hotelId: string, roomName: string, tag: string) => `lite-${hotelId}-${createHash("sha256").update(`${roomName}|${tag}`).digest("hex").slice(0, 12)}`;
+const liteOfferId = (hotelId: string, roomName: string, tag: string, checkIn: string, checkOut: string) => `lite-${hotelId}-${createHash("sha256").update(`${checkIn}|${checkOut}|${roomName}|${tag}`).digest("hex").slice(0, 12)}`;
 export type StayResearch = { sourceLabel: string; pros: string[]; cons: string[]; nearby: string[]; summary?: string };
 export type LiveStay = { offer: Offer; research: StayResearch; ref: LiteRef | ExternalRef };
 export type LiteRef = { provider: "LITEAPI"; hotelId: string; offerId: string; roomName: string; refundableTag: string };
@@ -121,7 +121,7 @@ export class LiteApi {
     for (const hotel of rates.data ?? []) for (const roomType of hotel.roomTypes ?? []) {
       const rate = liteRateSummary(roomType);
       if (!rate || rate.maxOccupancy < trip.guests) continue;
-      rows.push({ offerId: liteOfferId(hotel.hotelId, rate.roomName, rate.refundableTag), provider: "LITEAPI", propertyName: names.get(hotel.hotelId) ?? hotel.hotelId,
+      rows.push({ offerId: liteOfferId(hotel.hotelId, rate.roomName, rate.refundableTag, trip.checkIn, trip.checkOut), provider: "LITEAPI", propertyName: names.get(hotel.hotelId) ?? hotel.hotelId,
         trip, totalCents: rate.totalCents, refundable: rate.refundableTag === "RFN", source });
     }
     try { this.observe(rows); } catch { /* telemetry is best-effort */ }
@@ -166,7 +166,7 @@ function mapLite(trip: Trip, hotelId: string, rate: NonNullable<ReturnType<typeo
   const roomType = rate.board && !/room only/i.test(rate.board) ? `${rate.roomName} · ${rate.board}` : rate.roomName;
   try {
     const offer = OfferSchema.parse({
-      offerId: liteOfferId(hotelId, rate.roomName, rate.refundableTag), offerVersion: "v1",
+      offerId: liteOfferId(hotelId, rate.roomName, rate.refundableTag, trip.checkIn, trip.checkOut), offerVersion: "v1",
       merchantId: "liteapi", merchantName: "Nuitée Connect hotel inventory (sandbox)", propertyId: hotelId, propertyName: name,
       city: String(detail?.city ?? trip.destination), roomType,
       checkInDate: trip.checkIn, checkOutDate: trip.checkOut, checkInAt, checkOutAt, checkInTimeKnown, checkOutTimeKnown,
@@ -249,7 +249,7 @@ function mapGoogle(trip: Trip, property: any, now: Date): LiveStay | undefined {
   catch { checkOutAt = localToInstant(trip.checkOut, "12:00 PM", trip.timeZone); }
   try {
     const offer = OfferSchema.parse({
-      offerId: `gh-${shortHash(property.property_token)}`, offerVersion: "v1",
+      offerId: `gh-${shortHash(`${property.property_token}|${trip.checkIn}|${trip.checkOut}`)}`, offerVersion: "v1",
       merchantId: "google-hotels", merchantName: price?.source ? String(price.source) : "Google Hotels listing",
       propertyId: shortHash(property.property_token), propertyName: String(property.name).slice(0, 160), city: trip.destination,
       roomType: essential.filter(item => !/^Sleeps/i.test(item)).slice(0, 3).join(" · ") || "Vacation rental",

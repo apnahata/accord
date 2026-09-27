@@ -4,6 +4,13 @@ const money = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const instant = z.iso.datetime({ offset: true });
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
+export const TRIP_STYLES = ["BEACH", "MOUNTAINS", "SKI", "CITY", "NATURE", "THEME_PARKS", "LAKE"] as const;
+export const TripStyleSchema = z.enum(TRIP_STYLES);
+export type TripStyle = z.infer<typeof TripStyleSchema>;
+/** A stretch of days a member can travel: arrive on or after `from`, leave on or before `to`. */
+export const AvailabilitySchema = z.object({ from: day, to: day }).strict().refine(range => range.to > range.from, "The last day must be after the first day");
+export type Availability = z.infer<typeof AvailabilitySchema>;
+
 /** The only authoritative business input schemas. Frontend and providers import these. */
 export const ConstraintsSchema = z.object({
   maxContributionCents: money,
@@ -16,6 +23,14 @@ export const ConstraintsSchema = z.object({
   requiresFullCashRefund: z.boolean(),
   requiresStepFreeAccess: z.boolean(),
   softPreference: z.string().max(1000),
+  /** Trip-planning answers. Private like everything else here; only anonymous totals ever leave the capsule. */
+  availability: z.array(AvailabilitySchema).max(6).optional(),
+  tripStyles: z.array(TripStyleSchema).max(TRIP_STYLES.length).optional(),
+  placeIdeas: z.string().trim().max(300).optional(),
+  placesToAvoid: z.string().trim().max(300).optional(),
+  /** How long this member would like the trip to be. A wish, not a limit. */
+  nights: z.number().int().min(1).max(14).optional(),
+  leavingFrom: z.string().trim().max(120).optional(),
 }).strict().refine(value => !value.earliestCheckInAt || !value.latestCheckInAt || Date.parse(value.earliestCheckInAt) <= Date.parse(value.latestCheckInAt), {
   message: "Earliest check-in must not be after latest check-in",
   path: ["latestCheckInAt"],
@@ -25,6 +40,17 @@ export const ConstraintsSchema = z.object({
 });
 export type Constraints = z.infer<typeof ConstraintsSchema>;
 
+/**
+ * A group that hasn't picked where or when yet. The host sets nothing else: dates, length and where to look
+ * all come from everyone's private answers.
+ */
+export const TripPlanSchema = z.object({
+  countryCode: z.string().regex(/^[A-Z]{2}$/).default("US"),
+}).strict();
+export type TripPlan = z.infer<typeof TripPlanSchema>;
+export type Region = "ANY" | "EAST" | "CENTRAL" | "WEST";
+/** How far ahead a group can plan; availability beyond this is ignored. */
+export const PLANNING_HORIZON_DAYS = 180;
 /** Public trip parameters the host sets. Private limits never go here. */
 export const TripSchema = z.object({
   destination: z.string().trim().min(2).max(120),
@@ -107,6 +133,12 @@ export const ExtractionSchema = z.object({
     earliestCheckInAt: instant.optional(), latestCheckInAt: instant.optional(), latestCheckOutAt: instant.optional(),
     requiresFullCashRefund: z.boolean().optional(), requiresStepFreeAccess: z.boolean().optional(),
     softPreferences: z.array(z.object({ kind: z.enum(["LOWEST_PRICE", "WALKABLE", "NEAR_ACTIVITIES", "QUIET"]), weight: z.number().min(0).max(1) })).optional(),
+    availability: z.array(z.object({ from: day, to: day }).strict()).max(6).optional(),
+    tripStyles: z.array(TripStyleSchema).max(TRIP_STYLES.length).optional(),
+    placeIdeas: z.string().max(300).optional(),
+    placesToAvoid: z.string().max(300).optional(),
+    nights: z.number().int().optional(),
+    leavingFrom: z.string().max(120).optional(),
   }).strict(),
   privacy: z.object({ reasonPrivate: z.boolean() }).strict(),
   unsupportedHardRequirements: z.array(z.object({ rawText: z.string(), reason: z.string() }).strict()),
