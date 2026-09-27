@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Clock3, LockKeyhole, MapPin, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Clock3, LockKeyhole, MapPin, RefreshCw, ShieldCheck, Sparkles, Users } from 'lucide-react';
 import { Button, CheckStatus, Empty, ErrorNotice, Funding, Integrity, LinkButton, Loading, OfferCard, OfferFacts, PageHeading, PrivateNote, Stability, Stale, StayArt, Tag, Timeline } from './components';
-import { api, ApiError, date, dateTime, money, post, segment } from './api';
+import { api, ApiError, calendarDate, date, dateTime, money, post, segment } from './api';
 import { PrivateExplanationCard, PublicExplanationCard } from './explanations';
 import { useAction, useResource, useRoomEvents } from './hooks';
-import { AutopilotBanner, Inbox, WatchLine } from './autopilot';
-import { DecidedTrip, PlanningBoard, planSummary } from './planning';
-import type { AnalyticsDTO, ConsentResponseDTO, EventDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO } from './contracts';
+import { Inbox, WatchLine } from './autopilot';
+import { StepCard } from './room-step';
+import type { AnalyticsDTO, ConsentResponseDTO, EventDTO, InboxDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO } from './contracts';
 import type { MerchantMutation } from '@accord/domain';
 
 function RoomNav({ roomId, active }: { roomId: string; active: 'room' | 'offers' }) { return <nav className="room-nav" aria-label="Group navigation"><Link aria-current={active === 'room' ? 'page' : undefined} to={`/rooms/${segment(roomId)}`}>Our group</Link><Link aria-current={active === 'offers' ? 'page' : undefined} to={`/rooms/${segment(roomId)}/offers`}>Explore stays</Link><Link to={`/rooms/${segment(roomId)}/me/summary`}><LockKeyhole size={14} />My private space</Link></nav>; }
@@ -37,50 +37,20 @@ export function Room() {
   const live = useRoomEvents(roomId);
   const room = useResource<PublicRoomDTO>(base, live.revision);
   const proposal = useResource<ProposalEnvelope>(room.data?.activeProposalId ? `/proposals/${segment(room.data.activeProposalId)}/public` : null, live.revision);
-  const events = useResource<{ events: EventDTO[] }>(`${base}/events`, live.revision);
-  const action = useAction();
-  const navigate = useNavigate();
-  const [invite, setInvite] = useState<string>();
-  const inviteTools = <>
-    <div className="button-row"><Button className="secondary" disabled={action.busy} onClick={() => action.run(async () => { const result = await post<{ inviteToken: string; inviteUrl?: string }>(`${base}/invites`); setInvite(result.inviteUrl ?? `${window.location.origin}/join/${segment(result.inviteToken)}`); })}>Invite friends</Button></div>
-    {invite && <div className="notice"><div><label htmlFor="room-invite">Share this private join link</label><input id="room-invite" value={invite} readOnly onFocus={event => event.target.select()} /></div></div>}
-  </>;
-  const planning = room.data?.planning;
-  const undecided = !!planning && planning.stage !== 'DECIDED';
-  const autopilotBusy = ['REPLANNING', 'SEARCHING', 'WIDENING'].includes(room.data?.autopilot?.status ?? '');
-  const heading = room.data?.trip ? `${room.data.trip.destination} · ${date(`${room.data.trip.checkIn}T12:00:00`)} – ${date(`${room.data.trip.checkOut}T12:00:00`)} · ${room.data.trip.guests} guests`
-    : planning ? planSummary(planning) : room.data?.goal;
-  return <div className="page">
-    <RoomNav roomId={roomId} active="room" />
-    <PageHeading eyebrow="Your next chapter, together" title={room.data?.name || 'Your shared space'} description={heading} aside={<LiveLabel connection={live.connection} />} />
-    {room.loading && !room.data && <Loading />}<ErrorNotice error={room.error} retry={room.refresh} />
+  const personal = useResource<PrivateProposalEnvelope>(room.data?.activeProposalId ? `/proposals/${segment(room.data.activeProposalId)}/me` : null, live.revision);
+  const inbox = useResource<InboxDTO>(`${base}/me/inbox`, live.revision);
+  const nudge = inbox.data?.messages.find(message => message.kind === 'NUDGE' && message.nudge?.status === 'OPEN');
+  const refresh = () => { room.refresh(); inbox.refresh(); personal.refresh(); };
+  return <div className="page step-room">
+    {room.loading && !room.data && <Loading />}
+    <ErrorNotice error={room.error} retry={room.refresh} />
     {room.data && <>
-      <div className="readiness-strip"><span className="icon-circle"><Users size={22} /></span><div><strong>{room.data.readyMemberCount} / {room.data.memberCount} private profiles ready</strong><span>Personal boundaries stay personal. Possibilities are shared.</span></div><Tag>{undecided ? 'planning' : room.data.status.replaceAll('_', ' ').toLowerCase()}</Tag></div>
-      <AutopilotBanner autopilot={room.data.autopilot} />
-      <div className="room-grid"><div className="stack">
-        {planning?.stage === 'DECIDED' && <DecidedTrip room={room.data} base={base} onChange={room.refresh} />}
-        {undecided ? <PlanningBoard room={room.data} base={base} onChange={room.refresh} invite={inviteTools} /> : room.data.status === 'STALE' ? <Stale changes={proposal.data?.changes}>
-          {autopilotBusy && <p className="replanning-note"><span className="autopilot-dot" aria-hidden="true" />Accord is already looking for another option. You don’t need to do anything.</p>}
-          <Button className={room.data.autopilot?.status === 'REPLANNING' ? 'secondary' : ''} disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`, { replan: true }); room.refresh(); })}>{action.busy ? 'Searching…' : room.data.autopilot?.status === 'REPLANNING' ? 'Search now' : 'Find another option'}<ArrowRight size={17} /></Button>
-        </Stale> : room.data.status === 'SEARCHING' ? <section className="panel searching"><span className="orbit" /><p className="eyebrow">Finding your common ground</p><h2>Looking for the shared yes.</h2><p>Accord is checking current stays against everyone’s confirmed requirements.</p><Loading /></section>
-          : room.data.status === 'BOOKED' ? <section className="panel booked-banner"><CheckCheck size={35} /><h2>Your group has a booking.</h2><p>Open your receipt for the provider mode and confirmed details.</p><LinkButton to={`${base}/receipt`}>View booking receipt</LinkButton></section>
-          : proposal.data && proposal.data.proposal.state !== 'STALE' ? <section className="panel current-proposal"><div className="section-heading"><p className="eyebrow">Your shared possibility</p><Tag>Proposal v{proposal.data.proposal.version}</Tag></div><StayArt city={proposal.data.proposal.offer.city} large /><div className="current-body"><p className="eyebrow"><MapPin size={13} />{proposal.data.proposal.offer.city}</p><h2>{proposal.data.proposal.offer.propertyName}</h2><p>{proposal.data.proposal.offer.roomType}</p><div className="feasibility"><CheckCheck size={18} />{proposal.data.proposal.offer.feasible ? 'Works for everyone’s confirmed requirements' : 'Doesn’t currently satisfy all confirmed requirements'}</div><div className="price-row"><div><strong>{money(proposal.data.proposal.equalShareCents)}</strong><span> / person</span></div><span>{money(proposal.data.proposal.offer.totalCents)} total</span></div><LinkButton to={`/proposals/${segment(proposal.data.proposal.proposalId)}`}>Meet your proposal</LinkButton></div></section>
-          : <section className="panel">
-            {room.data.autopilot?.status === 'NO_OPTION' ? <Empty title="No shared yes just yet.">Everyone has confirmed, but no current stay works for all of you. Accord is still looking, and anyone can review their own requirements privately.</Empty> : <Empty title="A good plan leaves room for everyone.">Invite your friends, then each confirm your requirements in your own private space.</Empty>}
-            <div className="button-row"><LinkButton to={`${base}/me/intake`}>Set my boundaries</LinkButton></div>
-            {inviteTools}
-            <hr /><Button className="secondary" disabled={action.busy || !!room.error} onClick={() => action.run(async () => { await post(`${base}/solve`); room.refresh(); navigate(`${base}/offers`); })}>{action.busy ? (room.data.trip && !planning?.rehearsal ? 'Searching…' : 'Finding stays…') : 'Search now'} <ArrowRight size={16} /></Button>
-            <p className="fine">{room.data.trip && !planning?.rehearsal ? 'Once everyone has confirmed, Accord searches Nuitée Connect on its own and proposes the best shared fit.' : 'Once everyone has confirmed, Accord searches on its own and proposes the best shared fit.'}</p>
-          </section>}
-        <ErrorNotice error={proposal.error} retry={proposal.refresh} /><ErrorNotice error={action.error} />
-        <Link to={`${base}/offers`} className="explore-link"><span><strong>A little more room to explore</strong><small>Compare stays and see how Accord found your common ground.</small></span><ArrowRight size={22} /></Link>
-      </div><aside className="stack">
-        <Inbox roomId={roomId} revision={live.revision} />
-        {proposal.data && <Funding proposal={proposal.data.proposal} />}
-        <Members room={room.data} base={base} onChange={room.refresh} />
-        <section className="private-mini"><LockKeyhole size={20} /><h3>Your boundaries. Your business.</h3><p>Only you can see and edit your personal requirements.</p><Link to={`${base}/me/summary`} className="text-button">My private space <ArrowRight size={15} /></Link></section>
-        {events.data && <Timeline events={events.data.events} />}<ErrorNotice error={events.error} retry={events.refresh} />
-      </aside></div>
+      <header className="step-head">
+        <h1>{room.data.name}</h1>
+        <p className="lead">{room.data.members.map(member => member.displayName).join(' · ')}</p>
+      </header>
+      <StepCard room={room.data} base={base} proposal={proposal.data} personal={personal.data} nudge={nudge} onChange={refresh} />
+      <ErrorNotice error={proposal.error} retry={proposal.refresh} />
     </>}
   </div>;
 }
@@ -122,7 +92,38 @@ function ProposalContent({ proposalId, privateView }: { proposalId: string; priv
   const approved = personal?.myApprovalStatus === 'APPROVED';
   const authorized = personal?.myPaymentStatus === 'AUTHORIZED' || personal?.myPaymentStatus === 'CAPTURED';
   const canSubmit = !!personal && personal.proposal.state === 'OPEN' && !expired && !approved && !resource.loading && !resource.error && acknowledgedHash === proposal?.proposalHash;
-  return <div className={`page ${privateView ? 'private-page' : ''}`}>
+  const approve = () => action.run(async () => {
+    if (!personal || !proposal) return;
+    try {
+      const result = await post<ConsentResponseDTO>(`${base}/consent`, { proposalHash: proposal.proposalHash, version: proposal.version, amountCents: personal.myContributionCents }, { 'Idempotency-Key': idempotency.current });
+      if (result.proposalHash !== proposal.proposalHash || result.version !== proposal.version || result.amountCents !== personal.myContributionCents || result.approvalStatus !== 'APPROVED') throw new Error('We couldn’t verify the approval result. Refresh before trying again.');
+      if (data?.roomId) navigate(`/rooms/${segment(data.roomId)}`);
+    } finally { setAcknowledgedHash(undefined); resource.refresh(); }
+  });
+  if (privateView) {
+    const problems = personal?.myConstraintChecks.filter(check => check.status !== 'PASS') ?? [];
+    return <div className="page step-room">
+      {roomId && <Link to={`/rooms/${segment(roomId)}`} className="back-link"><ArrowLeft size={15} />Back</Link>}
+      {resource.loading && !data && <Loading />}
+      <ErrorNotice error={resource.error} retry={resource.refresh} />
+      {data && proposal && personal && <section className="step-card">
+        <p className="step-from"><Sparkles size={14} />Accord</p>
+        <h2>{stale ? 'This stay changed.' : approved ? 'You’ve approved.' : 'Approve your share.'}</h2>
+        <h3>{proposal.offer.propertyName}</h3>
+        <p className="subtle">{proposal.offer.city} · {calendarDate(proposal.offer.checkInDate)} – {calendarDate(proposal.offer.checkOutDate)}</p>
+        <p className="step-price"><strong>{money(personal.myContributionCents)}</strong></p>
+        {problems.length > 0 ? <ul className="why-list">{problems.map(check => <li key={check.label}>{check.label}. {check.privateExplanation}</li>)}</ul> : !stale && <p>This fits what you told Accord.</p>}
+        {!stale && !approved && proposal.state === 'OPEN' && <>
+          <label className="checkbox-row"><input type="checkbox" checked={acknowledgedHash === proposal.proposalHash} onChange={event => setAcknowledgedHash(event.target.checked ? proposal.proposalHash : undefined)} /><span>This is the stay and the amount I mean.</span></label>
+          <div className="step-action"><Button disabled={!canSubmit || action.busy} onClick={approve}>{action.busy ? 'Saving…' : `Approve ${money(personal.myContributionCents)}`}</Button></div>
+        </>}
+        {approved && !stale && <div className="step-action"><LinkButton to={`/rooms/${segment(data.roomId)}`}>Back to the trip</LinkButton></div>}
+        {stale && <div className="step-action"><LinkButton to={`/rooms/${segment(data.roomId)}`}>Back to the trip</LinkButton></div>}
+        <ErrorNotice error={action.error} />
+      </section>}
+    </div>;
+  }
+  return <div className="page">
     {roomId && <Link to={`/rooms/${segment(roomId)}`} className="back-link"><ArrowLeft size={15} />Back to your group</Link>}
     <PageHeading eyebrow={privateView ? 'Your decision. Your exact contribution.' : 'One plan. Everyone on board.'} title={stale ? 'The offer changed. Your trust shouldn’t.' : proposal ? `A shared stay in ${proposal.offer.city}.` : 'Your shared proposal'} aside={proposal && <Tag>Proposal v{proposal.version}</Tag>} />
     {resource.loading && !data && <Loading />}

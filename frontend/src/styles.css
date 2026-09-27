@@ -68,7 +68,7 @@
 .trip-fields input{width:100%}
 @media(max-width:520px){.trip-fields{grid-template-columns:1fr 1fr}.trip-fields>div:last-child{grid-column:1/-1}}
 .account-profile{display:flex;justify-content:space-between;align-items:flex-start;gap:2rem}.account-profile>div:first-child{max-width:42rem}.account-profile h2{margin:.75rem 0 .35rem}.account-profile form{min-width:min(100%,22rem)}.account-heading{display:flex;align-items:end;justify-content:space-between;gap:1rem;margin:3rem 0 1rem}.account-heading h2{margin:.2rem 0 0}.account-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,21rem),1fr));gap:1rem}.account-trip h3{margin:1.2rem 0 .6rem}.account-trip>p{display:flex;align-items:center;gap:.45rem}.booking-history{display:flex;align-items:flex-start;gap:.65rem;padding:1rem;margin:1rem 0;border-radius:1rem;background:#edf2e8}.booking-history div{display:grid;gap:.2rem}.booking-history span,.booking-history small{color:var(--muted)}.payment-history{display:grid}.payment-history article{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:1rem;padding:1rem 0;border-bottom:1px solid var(--line)}.payment-history article:last-child{border-bottom:0}.payment-history article>div:not(.payment-amount){display:grid;gap:.2rem}.payment-history span,.payment-history small{color:var(--muted)}.payment-amount{display:grid;justify-items:end;gap:.35rem}@media(max-width:700px){.account-profile{flex-direction:column}.account-heading{align-items:flex-start;flex-direction:column}.payment-history article{grid-template-columns:auto 1fr}.payment-amount{grid-column:2;justify-items:start}}
-.dashboard-actions{display:flex;gap:.75rem;flex-wrap:wrap}.account-settings{margin-top:3rem}.account-settings summary{display:flex;align-items:center;gap:.6rem;cursor:pointer;font-weight:600}.account-settings form{max-width:28rem;margin-top:1rem}.site-header nav>a{display:inline-flex;align-items:center;gap:.35rem}.account-name{padding-left:.8rem;border-left:1px solid var(--line);font-size:.75rem;color:var(--muted)}.site-header .nav-signout{padding:.55rem;border-radius:50%;min-width:2.25rem;height:2.25rem}.site-header .nav-signout svg{margin:0}@media(max-width:760px){.account-name{display:none}.site-header nav>a:nth-child(2),.site-header nav>a:nth-child(3){display:none}}
+.dashboard-actions{display:flex;gap:.75rem;flex-wrap:wrap}.account-settings{margin-top:3rem}.account-settings summary{display:flex;align-items:center;gap:.6rem;cursor:pointer;font-weight:600}.account-settings form{max-width:28rem;margin-top:1rem}.site-header nav>a{display:inline-flex;align-items:center;gap:.35rem}.account-name{padding-left:.8rem;border-left:1px solid var(--line);font-size:.75rem;color:var(--muted)}.site-header .nav-signout{display:inline-flex;align-items:center;justify-content:center;width:2.25rem;height:2.25rem;min-width:2.25rem;min-height:2.25rem;padding:0;border-radius:50%;flex:none}.site-header .nav-signout svg{margin:0}@media(max-width:760px){.account-name{display:none}.site-header nav>a:nth-child(2),.site-header nav>a:nth-child(3){display:none}}
 .autopilot-banner{display:flex;gap:14px;align-items:center;margin:0 0 22px;padding:14px 18px;border:1px solid #d9e3da;border-radius:16px;background:#f3f7f1}.autopilot-banner>div{display:grid;gap:2px}.autopilot-banner strong{font-size:14px;letter-spacing:-.01em}.autopilot-banner span:not(.autopilot-mark){color:var(--muted);font-size:14px}.autopilot-mark{display:grid;place-items:center;flex:none;width:32px;height:32px;border-radius:50%;background:var(--green);color:#fff}.autopilot-banner.busy .autopilot-mark{animation:autopilot-pulse 1.4s ease-in-out infinite}.autopilot-banner.no_option{background:#fbf5ee;border-color:#eddcc9}.autopilot-banner.no_option .autopilot-mark{background:#be8254}.autopilot-banner.waiting_for_members .autopilot-mark,.autopilot-banner.idle .autopilot-mark{background:#8a9a8f}@keyframes autopilot-pulse{0%,100%{box-shadow:0 0 0 0 rgba(35,77,61,.35)}50%{box-shadow:0 0 0 9px rgba(35,77,61,0)}}
 .replanning-note{display:flex;align-items:center;gap:10px;font-weight:500}.autopilot-dot{flex:none;width:9px;height:9px;border-radius:50%;background:var(--green);animation:autopilot-pulse 1.4s ease-in-out infinite}
 .inbox-panel{border-color:#d9e3da;background:#fbfcf9}.inbox-panel h3{display:flex;gap:8px;align-items:center}.inbox-list{list-style:none;margin:0 0 12px;padding:0;display:grid;gap:10px}.inbox-item{display:grid;gap:4px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#fff}.inbox-item time{font-size:12px;color:var(--muted)}.inbox-item p{margin:0;font-size:14px;line-height:1.5}.inbox-item.open{border-color:#be8254;box-shadow:0 0 0 3px rgba(190,130,84,.12)}.inbox-item.stale_reason{border-left:3px solid #be8254}.inbox-item.ready_to_book{border-left:3px solid var(--green)}.inbox-item .button-row{margin-top:8px;flex-wrap:wrap}.inbox-item .text-button{margin-top:4px}
@@ -122,3 +122,49 @@
 .movers th small{display:block;color:var(--muted);font-weight:400;font-size:10px}
 .movers td,.movers th{font-size:12px;text-align:left;padding:6px 8px}
 @media(max-width:520px){.funnel-bars li{grid-template-columns:110px 1fr 36px}}
+.step-room{max-width:520px;padding-top:36px}
+.step-head{margin:0 0 22px}
+.step-head h1{margin:0;font-size:clamp(34px,5vw,46px);letter-spacing:-.045em;line-height:1.08}
+.step-head .lead{margin:10px 0 0;font-size:15px;color:var(--muted)}
+.step-card{padding:22px;border:1px solid var(--line);border-radius:18px;background:#fffefa;box-shadow:0 10px 30px #243f3408}
+.step-card h2{font-size:28px;letter-spacing:-.04em;line-height:1.15;margin:0 0 6px}
+.step-card>p,.step-stay-body>p{color:var(--muted);font-size:15px;line-height:1.55}
+.step-from{display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--green)}
+.step-card .segmented{display:flex;width:100%;padding:4px;gap:4px;margin:0 0 6px;border-radius:12px}
+.step-card .segmented button{flex:1;min-height:40px;padding:8px 12px;border-radius:9px;font-size:13px;font-weight:500;line-height:1.2}
+.step-card .form-panel>label:first-of-type{margin-top:18px}
+.step-card input:not([type="checkbox"]),.step-card textarea{background:#fff;border-radius:10px;padding:14px 15px}
+.step-card .money-input>span{top:15px}
+.step-action{display:flex;gap:10px;margin-top:22px}
+.step-card>.step-action:first-child{margin-top:0}
+.step-action>.button,.step-action>a.button{flex:1}
+.step-card>.form-panel>.button,.step-card.form-panel>.button{width:100%;margin-top:22px}
+.step-card .copy-field{align-items:stretch;margin-top:8px}
+.step-card .copy-field .button{flex:none;padding-inline:16px}
+.step-card .conversation-log{margin:4px 0 16px;max-height:min(52vh,420px);overflow-y:auto;scroll-behavior:smooth}
+.step-card .conversation-log:empty{display:none}
+.step-card .conversation-compose textarea{margin:0;min-height:0;height:52px;padding:14px 16px;line-height:1.4;resize:none}
+.step-card .conversation-compose textarea::placeholder{color:#8b9284}
+.step-card .conversation-compose textarea:focus,.step-card .conversation-compose textarea:focus-visible{outline:none;border-color:#be8254;box-shadow:0 0 0 3px #be825426}
+.step-card .notice{margin:16px 0 0}
+.step-options{display:grid;gap:12px;margin-top:18px}
+.step-options .trip-option{padding:16px 16px 14px;border-radius:14px}
+.step-options .trip-option h3{font-size:18px;margin:0 0 4px}
+.step-options .trip-option .subtle{margin:0}
+.step-options .trip-option .button{width:100%;margin-top:12px}
+.step-options .my-vote{margin-top:12px}
+.step-price{margin:12px 0 0;font-size:15px}
+.step-price strong{font-family:'Manrope',sans-serif;font-size:26px;font-weight:500;letter-spacing:-.04em}
+.step-price span{color:var(--muted);font-size:13px}
+.step-stay{padding:0;overflow:hidden}
+.step-stay .step-from,.step-stay>h2{margin-left:22px;margin-right:22px}
+.step-stay .step-from{margin-top:22px}
+.step-stay-body{padding:4px 22px 22px}
+.step-stay-body h3{margin:14px 0 4px;font-size:22px}
+.step-stay-body .listing-link{display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:8px 12px;border:1px solid #c5d0c0;border-radius:8px;background:#fff;color:var(--green);font-size:13px;font-weight:600}
+.step-stay-body .listing-link:hover{background:#edf0e7}
+.step-stay .stay-art{height:200px;border-radius:0}
+.step-card .boundary-list{margin:8px 0 4px}
+.step-card .heard{margin:14px 0 0;font-size:18px;line-height:1.55;color:var(--ink);letter-spacing:-.02em}
+.step-card .boundary-list>div{padding:12px 0}
+@media(max-width:640px){.step-room{padding-left:20px;padding-right:20px}.step-action{flex-direction:column}}

@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { LogOut, Plus, Users } from 'lucide-react';
+import { LogOut, Plus } from 'lucide-react';
 import { Brand, Button } from './components';
 import { Landing, NewRoom, JoinRoom, JoinEntry } from './pages-entry';
 import { Summary } from './pages-private';
@@ -21,21 +21,18 @@ function App() {
   const account = useResource<AccountDTO>('/me', location.key);
   const signedIn = account.data?.user.email ? account.data : undefined;
   const signOut = useAction();
+  const home = location.pathname === '/';
   useEffect(() => { window.scrollTo(0, 0); document.querySelector<HTMLElement>('#main')?.focus(); }, [location.pathname]);
   return <>
     <a href="#main" className="skip-link">Skip to content</a>
     <header className="site-header"><Brand /><nav aria-label="Main navigation">
-      {signedIn ? <>
-        <Link to="/me">Dashboard</Link>
-        <Link to="/rooms/new"><Plus size={14} />New group</Link>
-        <Link to="/join"><Users size={14} />Join</Link>
-        <span className="account-name">{signedIn.user.displayName}</span>
-        <Button className="nav-signout" aria-label="Sign out" disabled={signOut.busy} onClick={() => signOut.run(async () => { await post('/logout'); navigate('/auth', { replace: true }); })}><LogOut size={15} /></Button>
-      </> : <>
+      {signedIn && location.pathname !== '/me' && <Link to="/me">Your trips</Link>}
+      {home && signedIn && <Link to="/rooms/new"><Plus size={14} />New trip</Link>}
+      {home && !signedIn && <>
         <a className="how-link" href="/#how-it-works">How it works</a>
-        <Link to="/auth?next=%2Fme">Sign in</Link>
-        <Link to="/auth?next=%2Frooms%2Fnew" className="nav-join">Create account</Link>
+        <Link to="/auth?next=%2Frooms%2Fnew" className="nav-join">Start a trip</Link>
       </>}
+      {signedIn && <Button className="nav-signout" aria-label="Sign out" disabled={signOut.busy} onClick={() => signOut.run(async () => { await post('/logout'); navigate('/auth', { replace: true }); })}><LogOut size={15} /></Button>}
     </nav></header>
     <main id="main" tabIndex={-1}><Routes>
       <Route path="/" element={<Landing />} />
@@ -56,7 +53,7 @@ function App() {
       <Route path="/pulse" element={<Pulse />} />
       <Route path="*" element={<div className="page narrow"><h1>A little off course.</h1><p>This page doesn’t exist.</p><Link to="/" className="button">Return home</Link></div>} />
     </Routes></main>
-    <footer className="site-footer"><Brand /><span>Good plans start with common ground.</span><Link to="/pulse" className="footer-link">Market pulse</Link><span className="footer-note">Personal boundaries. Shared possibilities.</span></footer>
+    {home && <footer className="site-footer"><Brand /><span>Good plans start with common ground.</span><Link to="/pulse" className="footer-link">Market pulse</Link></footer>}
   </>;
 }
 
