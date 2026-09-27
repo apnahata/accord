@@ -45,7 +45,8 @@ export class MongoPersistence {
 
   static async connect(uri: string, dbName: string, encryptionKey: string) {
     const sealer = new Sealer(encryptionKey);
-    const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10_000, appName: "accord-coordinator" });
+    // ignoreUndefined: an absent optional field is never stored as null (null would fail Offer validation on reload).
+    const client = new MongoClient(uri, { ignoreUndefined: true, serverSelectionTimeoutMS: 10_000, appName: "accord-coordinator" });
     await client.connect();
     const persistence = new MongoPersistence(client, dbName, sealer);
     await persistence.#ensureIndexes();
