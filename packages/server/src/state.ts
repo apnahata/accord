@@ -101,11 +101,12 @@ const merchantContract: MerchantContract<Offer, MerchantMutation, MerchantEvent>
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const nowIso = () => new Date().toISOString();
+// Optional offer fields that older data may hold as null (absent values used to be stored as null).
+const OPTIONAL_OFFER_FIELDS = ["rating", "reviewCount", "imageUrl", "address", "externalUrl", "fullRefundDeadline", "source", "bookingMode"] as const;
 function compatibleOffer(value: Offer | Record<string, unknown>): Offer {
-  const input = { ...(value as Offer & { checkInDate?: string; checkOutDate?: string; checkInTimeKnown?: boolean; checkOutTimeKnown?: boolean }) };
-  // Mongo stores a missing optional field as null. Null is not "absent" to the schema, so a hotel
-  // with no rating used to crash planning after the search had already succeeded.
-  for (const [key, item] of Object.entries(input)) if (item === null && key !== "stepFreeVerified") delete input[key as keyof typeof input];
+  const cleaned: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of OPTIONAL_OFFER_FIELDS) if (cleaned[key] === null) delete cleaned[key];
+  const input = cleaned as Offer & { checkInDate?: string; checkOutDate?: string; checkInTimeKnown?: boolean; checkOutTimeKnown?: boolean };
   return OfferSchema.parse({ ...input,
     checkInDate: input.checkInDate ?? String(input.checkInAt).slice(0, 10),
     checkOutDate: input.checkOutDate ?? String(input.checkOutAt).slice(0, 10),
