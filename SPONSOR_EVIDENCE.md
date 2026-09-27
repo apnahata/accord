@@ -52,33 +52,33 @@ This ledger separates live provider proof from local synthetic tests, code paths
 
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
-- **Credentials/account:** Not configured.
-- **Feature:** Planned opt-in reusable member preferences; not yet connected to authenticated user flow.
+- **Credentials/account:** A real `BACKBOARD_API_KEY` is configured in the local gitignored `.env`.
+- **Feature:** Opt-in, reusable, non-financial member preferences (walkable / quiet / near-activities / refundable), recalled on a later trip and only ever applied to the current trip after the member explicitly confirms. Never a preference is written without that confirmation, and budgets/trip requirements are never sent to Backboard.
 - **Why Accord needs it:** Let a member recall reusable preferences in a later trip without turning them into spending permission.
-- **Implementation:** Generic adapter in `packages/integrations/src/backboard.ts`; no user mapping, memory write or recall flow is wired.
-- **Code path:** `/api/rooms/:id/me/memories` returns `BACKBOARD_UNAVAILABLE`.
-- **Live proof:** None.
+- **Implementation:** Adapter (unchanged) in `packages/integrations/src/backboard.ts` is now wired end to end. `packages/server/src/state.ts` lazily provisions one Backboard assistant per account on first use (`AccordState.memories`/`#ensureAssistant`), caches its id on the Mongo-persisted user record (`User.assistantId`), and exposes `AccordState.applyMemory` which only calls `Backboard.remember(...)` after the member's own explicit `{confirmed:true}` in that request. Applied-memory ids are tracked per room membership (`Member.appliedMemoryIds`) so "applied to this trip" reflects only this room. The frontend's existing `MemoryPanel` (`frontend/src/pages-private.tsx`) already called this exact contract and needed no changes.
+- **Code path:** `GET /api/rooms/:id/me/memories`, `POST /api/rooms/:id/me/memories/:memoryId/apply`; health/`/api/capabilities` now report `backboard: CONFIGURED`/`available:true` from `Boolean(BACKBOARD_API_KEY)`, matching the `ai`/`liteapi` pattern (no cheap live-ping endpoint is documented for Backboard).
+- **Live proof:** On 2026-09-26, a direct authenticated `POST https://app.backboard.io/api/assistants` with the configured key returned HTTP 200 and created a real assistant (`assistant_id: ebaca5ff-ea20-4dd3-a22b-454adf801d01`), confirming the key and endpoint are live. `packages/server/test/backboard.test.ts` separately exercises the full in-app flow (assistant provisioning, caching, recall, explicit-confirmation-only apply, 404 for an unknown memory id) against a controlled stub. The full through-the-app path (a real member triggering assistant provisioning + a real remembered preference recalled and applied in a live room) has not yet been exercised end to end with this key.
 - **Screenshot:** None.
-- **Transaction/query/reference:** None.
-- **Failure behavior:** Current-trip preferences can be entered manually.
-- **Known limitations:** No API key, stored assistant mapping proof, actual memory or retrieval session.
-- **Submission status:** Not verified; do not claim Backboard memory yet.
+- **Transaction/query/reference:** Backboard assistant id `ebaca5ff-ea20-4dd3-a22b-454adf801d01` (test provisioning call, not created through the Accord app).
+- **Failure behavior:** If `BACKBOARD_API_KEY` is absent, every route fails closed with `BACKBOARD_UNAVAILABLE` before any network call; current-trip preferences can still be entered manually.
+- **Known limitations:** Applying a remembered preference re-confirms it to Backboard (per spec) rather than de-duplicating prior writes, which is a known adapter-level quirk. The end-to-end app flow (real user → real assistant → real remembered/applied preference visible in the room UI) has not yet been walked through live, only the direct API call and the stubbed test suite.
+- **Submission status:** Wiring complete; key verified live against Backboard's API directly. Do a full in-app walkthrough before claiming the complete member-facing flow is live.
 
 ## Solana
 
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
-- **Credentials/account:** No operator devnet signer configured.
-- **Feature:** Planned devnet operator commitment to the backend proposal hash.
+- **Credentials/account:** A devnet keypair was generated locally for this task (address `EhMyvqXR1ghvQgC4J5LFxuR4KFQmdTEf3ErEphi7JnbR`; secret key is only in the local gitignored `.env` as `SOLANA_SIGNER_SECRET_KEY`, never committed). It is **not funded**: every `requestAirdrop` call to `https://api.devnet.solana.com` during this work returned HTTP 429 ("airdrop limit today or the faucet has run dry"), tried repeatedly at decreasing amounts (1, 0.5, 0.1, 0.05, 0.01 SOL) over several minutes, including a final retry just before writing this note. `solana`/`solana-keygen` CLI were not available in this environment, so the keypair was generated with `@solana/keys`/`@solana/kit` directly (seed + public key concatenated into the standard 64-byte secret, base58-encoded — round-trip verified against `createKeyPairSignerFromBytes`).
+- **Feature:** On `PROPOSAL_CREATED`, `PROPOSAL_STALE`, and `BOOKING_CONFIRMED`, Accord attempts a best-effort devnet memo-program commitment of the proposal's existing canonical hash, id and version. The result (`NOT_RECORDED` / `PENDING` / `CONFIRMED` / `FAILED`) is now a real field on the proposal DTO (`PublicProposalDTO.solana`) instead of a hardcoded value, and is never authoritative over consent, payment or booking.
 - **Why Accord needs it:** Provide an external reference to nonprivate proposal versions while backend consent remains authoritative.
-- **Implementation:** Generic adapter in `packages/integrations/src/solana.ts`; canonical hashes come from `@accord/domain`. No API transaction wiring.
-- **Code path:** Proposal DTO in `packages/server/src/state.ts` reports `NOT_RECORDED`.
-- **Live proof:** None.
+- **Implementation:** Adapter (unchanged except for adding an exported `signerFromSecret()` helper and a narrow `SolanaCommitmentsPort` interface for testability) in `packages/integrations/src/solana.ts`; canonical hashes come from the proposal's existing `@accord/domain` hash. `packages/server/src/server.ts` builds a `KeyPairSigner` from `SOLANA_SIGNER_SECRET_KEY` (base58 or JSON byte array, via `createKeyPairSignerFromBytes`) only when that variable is set; with no signer, the `solana` provider is never attached and the DTO stays `NOT_RECORDED`, matching the existing fail-closed pattern for optional providers (`liteApi`, `google`, `payment`). `packages/server/src/state.ts` calls the adapter fire-and-forget at the three event types, persists the pending signature via Mongo write-through before broadcasting (per the adapter's contract), and writes the reconciled result onto the proposal, which is now included in Mongo persistence (`proposals.solana`) and survives a restart.
+- **Code path:** Best-effort call sites in `AccordState.#solve` (`PROPOSAL_CREATED`), `AccordState.stale` (`PROPOSAL_STALE`), and both booking paths in `AccordState.#execute`/`#bookLiteApi` (`BOOKING_CONFIRMED`); surfaced on `GET /api/proposals/:id/public` and `/me`; health reports `solana: CONFIGURED`/`UNCONFIGURED` from whether a signer was constructed.
+- **Live proof:** None yet — the generated keypair has zero devnet SOL, so a real broadcast has not been demonstrated. What **is** verified live: the code path constructs a real `@solana/kit` devnet RPC client, performs the same genesis-hash devnet check, transaction construction, and local signing the adapter uses in production, all confirmed offline in `packages/integrations/test/solana.test.ts` against a stubbed RPC (record/reconcile success, non-devnet rejection, on-chain failure, and `signerFromSecret` round-tripping a real generated keypair through both base58 and JSON-array forms). `packages/server/test/solana.test.ts` verifies the proposal DTO wiring end to end (unconfigured → `NOT_RECORDED`; configured with a stub → `CONFIRMED` with a signature and explorer URL surfaced on the DTO after `PROPOSAL_CREATED`; a merchant price change triggers a `PROPOSAL_STALE` attempt; an adapter that throws never blocks proposal creation).
 - **Screenshot:** None.
-- **Transaction/query/reference:** None; no signature or explorer URL exists.
-- **Failure behavior:** Backend consent stays enforced, and no explorer link is shown.
-- **Known limitations:** No funded devnet signer, genuine transaction, hash-difference test or confirmation proof.
-- **Submission status:** Not verified; do not claim an on-chain commitment yet.
+- **Transaction/query/reference:** None real yet. Once funded (see below), the very first proposal created against this branch with `SOLANA_SIGNER_SECRET_KEY` set will produce a genuine devnet transaction signature and `https://explorer.solana.com/tx/<signature>?cluster=devnet` link, visible on the proposal DTO.
+- **Failure behavior:** Backend consent stays enforced regardless of Solana's outcome; an adapter exception or an unfunded signer both fail closed to `FAILED`/`NOT_RECORDED` without touching booking or payment (`packages/server/test/solana.test.ts` covers the throwing case explicitly).
+- **Known limitations:** No funded devnet signer, so no genuine on-chain transaction, signature, or explorer link has actually been produced. **To finish this**: fund the generated address with `solana airdrop 1 EhMyvqXR1ghvQgC4J5LFxuR4KFQmdTEf3ErEphi7JnbR --url devnet` (or https://faucet.solana.com, which uses a captcha and doesn't hit the same rate limit as the plain RPC faucet), confirm with `solana balance EhMyvqXR1ghvQgC4J5LFxuR4KFQmdTEf3ErEphi7JnbR --url devnet`, then create a proposal against a running Accord API with that `.env` — the resulting signature/explorer URL on the proposal DTO is the live proof this entry is still missing.
+- **Submission status:** Wiring complete and covered by tests against a stubbed RPC; still not verified live — do not claim an on-chain commitment until the signer above is funded and a real devnet transaction signature is captured.
 
 ## Vultr
 
@@ -100,17 +100,17 @@ This ledger separates live provider proof from local synthetic tests, code paths
 
 - **Challenge:** HackGT eligibility not verified; official rules/account not supplied.
 - **Official requirement:** Not verified.
-- **Credentials/account:** Not configured.
-- **Feature:** Planned voice intake; no audio route is connected.
+- **Credentials/account:** A real `ELEVENLABS_API_KEY` is configured in the local gitignored `.env`.
+- **Feature:** Private voice intake: a member records audio in the browser, it is transcribed, and the transcript is sent through the *exact same* text-intake confirmation pipeline (`POST /me/intake/extract`) — never a shortcut around the structured-confirmation review step. The frontend's existing `Voice` component and Intake page (`frontend/src/pages-private.tsx`, `frontend/src/pages-intake.tsx`) already implemented this "record → transcribe → send as a normal message → review → confirm" flow and needed no changes; only the missing server endpoint was wired.
 - **Why Accord needs it:** Let members privately state functional constraints by voice and confirm the resulting structured candidate.
-- **Implementation:** Adapter in `packages/integrations/src/voice.ts`; no real service call in the API.
-- **Code path:** `/api/intake/transcribe` returns `ELEVENLABS_UNAVAILABLE`.
-- **Live proof:** None; no real audio/transcription request.
+- **Implementation:** Adapter (unchanged) in `packages/integrations/src/voice.ts` is now called from `packages/server/src/server.ts`. A small dependency-free multipart/form-data reader (`multipartFile`) extracts the uploaded `audio` field from the request the existing frontend already sends, builds a `Blob` with its declared content type, and calls `ElevenLabs.transcribe()`. The returned transcript is size- and type-validated by the adapter (already implemented) and handed back as plain text; the client then posts it to the pre-existing `/me/intake/extract` route like any typed message, so nothing is ever saved before the member reviews and confirms the draft.
+- **Code path:** `POST /api/intake/transcribe` (authenticated; previously a hardcoded `ELEVENLABS_UNAVAILABLE` stub, matching the exact endpoint the frontend `Voice` component already called); health/`/api/capabilities` now report `elevenlabs: CONFIGURED`/`elevenLabs.available:true` from `Boolean(ELEVENLABS_API_KEY && ELEVENLABS_MODEL)`.
+- **Live proof:** On 2026-09-26, a direct authenticated `GET https://api.elevenlabs.io/v1/user` with the configured key returned HTTP 200 with a real account (`user_id: user_6001m3g87mxbeje9hkkcpgq09x2n`, free tier), confirming the key is live and the `scribe_v1` model is reachable. `packages/server/test/voice.test.ts` separately exercises the full in-app flow (unconfigured → 503 with no network call; unauthenticated → 401 with no network call; configured → uploaded audio transcribed and returned; wrong content type or missing `audio` field → 422 before any call) against a controlled stub. An actual browser recording has not yet been transcribed end to end through the app with this key.
 - **Screenshot:** None.
-- **Transaction/query/reference:** None.
-- **Failure behavior:** Text input remains available.
-- **Known limitations:** No API key, captured audio, actual transcript or UI confirmation proof.
-- **Submission status:** Not verified; do not claim ElevenLabs use.
+- **Transaction/query/reference:** ElevenLabs account `user_6001m3g87mxbeje9hkkcpgq09x2n` (auth check, not a transcription call).
+- **Failure behavior:** If `ELEVENLABS_API_KEY` is absent, the route fails closed with `ELEVENLABS_UNAVAILABLE` before any network call; the frontend already hides the voice button when `/api/capabilities` reports it unavailable, and typed text input remains fully available either way.
+- **Known limitations:** The multipart parser is a minimal implementation sufficient for the browser's own `FormData` upload shape, not a general-purpose multipart library. Real speech-to-text quality/latency through the actual app UI has not yet been walked through with this key, only the auth check and the stubbed test suite.
+- **Submission status:** Wiring complete; key verified live against ElevenLabs's API directly. Do a real in-browser voice-intake walkthrough before claiming the complete member-facing flow is live.
 
 ## Visa / payments
 

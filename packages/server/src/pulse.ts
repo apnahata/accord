@@ -107,6 +107,14 @@ export class Pulse {
     return result;
   }
 
+  /** How many live prices Accord has checked for this room's exact trip (destination/dates/guests), across every listing considered. Room-scoped, still anonymous. */
+  async roomActivity(trip: Trip): Promise<{ observations: number; listings: number }> {
+    const row = (await this.pool.query(`SELECT count(*)::bigint AS observations, count(DISTINCT offer_id)::int AS listings
+      FROM accord_price_observations WHERE destination = $1 AND check_in = $2 AND nights = $3 AND guests = $4`,
+      [normalize(trip.destination), trip.checkIn, nights(trip), trip.guests])).rows[0] ?? {};
+    return { observations: Number(row.observations ?? 0), listings: Number(row.listings ?? 0) };
+  }
+
   async offerHistory(trip: Trip, offerId: string) {
     const rows = (await this.pool.query(`SELECT bucket, last_cents FROM accord_price_5m
       WHERE offer_id = $1 AND check_in = $2 AND nights = $3 AND guests = $4 AND bucket > now() - INTERVAL '24 hours' ORDER BY bucket`,

@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { LogOut, Plus } from 'lucide-react';
+import { Activity, LogOut, Plus } from 'lucide-react';
 import { Brand, Button } from './components';
 import { Landing, NewRoom, JoinRoom, JoinEntry } from './pages-entry';
 import { Summary } from './pages-private';
@@ -27,6 +27,7 @@ function App() {
     <a href="#main" className="skip-link">Skip to content</a>
     <header className="site-header"><Brand /><nav aria-label="Main navigation">
       {signedIn && location.pathname !== '/me' && <Link to="/me">Your trips</Link>}
+      {home && <Link to="/pulse"><Activity size={14} />Market pulse</Link>}
       {home && signedIn && <Link to="/rooms/new"><Plus size={14} />New trip</Link>}
       {home && !signedIn && <>
         <a className="how-link" href="/#how-it-works">How it works</a>

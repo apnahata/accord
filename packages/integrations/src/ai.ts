@@ -16,7 +16,7 @@ export class Gemini {
       // Schema parsing must produce an allowlisted projection, not a passthrough object.
       const safeInput = task.input.parse(input);
       if (!/^[a-zA-Z0-9._-]+$/.test(this.config.model!)) throw new IntegrationError("INVALID_MODEL");
-      const raw = await requestJson(this.config.fetch ?? fetch,
+      const call = () => requestJson(this.config.fetch ?? fetch,
         `https://generativelanguage.googleapis.com/v1beta/models/${this.config.model}:generateContent`, {
           method: "POST",
           headers: { "x-goog-api-key": this.config.apiKey!, "content-type": "application/json" },
@@ -29,6 +29,15 @@ export class Gemini {
             },
           }),
         });
+      // The model provider occasionally reports transient capacity errors (HTTP 5xx); one short retry
+      // meaningfully cuts user-visible AI_UNAVAILABLE failures without masking a real outage or misconfiguration.
+      let raw: unknown;
+      try { raw = await call(); }
+      catch (error) {
+        if (!(error instanceof IntegrationError) || !/^HTTP_5\d\d$/.test(error.code)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 800));
+        raw = await call();
+      }
       const envelope = z.object({ candidates: z.array(z.object({
         finishReason: z.string(), content: z.object({ parts: z.array(z.object({ text: z.string().optional(), thought: z.boolean().optional() })) }),
       })).min(1) }).parse(raw);

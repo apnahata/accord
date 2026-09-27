@@ -66,6 +66,8 @@ const codeCopy: Record<string, string> = {
   NUDGE_NOT_FOUND: 'This message is no longer available.',
   NUDGE_CLOSED: 'You already answered this, or your requirements changed since. Nothing else was changed.',
   AI_UNAVAILABLE: 'Accord can’t reply right now. Try again in a moment.',
+  EMPTY_TRANSCRIPT: 'Accord didn’t catch any words in that recording. Try again, speaking clearly, or type your requirements below.',
+  ELEVENLABS_UNAVAILABLE: 'Voice input isn’t available right now. You can type your requirements below.',
 };
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;

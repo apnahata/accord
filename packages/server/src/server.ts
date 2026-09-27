@@ -6,7 +6,7 @@ import { z } from "zod";
 import { addDays, AvailabilitySchema, ConstraintsSchema, ExtractionSchema, localDay, MerchantMutationSchema, PLANNING_HORIZON_DAYS, TRIP_STYLES, TripPlanSchema, TripSchema, TripStyleSchema, equalShares } from "@accord/domain";
 import { Gemini } from "../../integrations/src/ai.js";
 import type { Fetch } from "../../integrations/src/result.js";
-import { AccordState, AppError } from "./state.js";
+import { AccordState, AppError, type Room } from "./state.js";
 import type { AlternativesInput, AutopilotOptions } from "./coordinator.js";
 import type { DestinationsInput } from "./planner.js";
 import { MongoPersistence } from "./persistence.js";
@@ -18,8 +18,14 @@ import { normalizeModelCheckout } from "./model-time.js";
 import { respectExplicitOptionality, triageExtraction } from "./intake.js";
 import { explainPrivate, explainPublic, publicOffersFingerprint } from "./explanations.js";
 import { cyberSourceFromEnv, type PaymentGateway } from "./payments.js";
+import { SolanaCommitments, signerFromSecret } from "../../integrations/src/solana.js";
+import type { SolanaCommitmentsPort } from "../../integrations/src/solana.js";
+import { Backboard } from "../../integrations/src/backboard.js";
+import { ElevenLabs } from "../../integrations/src/voice.js";
+import type { KeyPairSigner } from "@solana/kit";
 
 const name = z.string().trim().min(1).max(100);
+const intakeMessage = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(1000) }).strict();
 const credentials = z.object({
   email: z.string().trim().email("Enter a valid email address").max(254, "Email is too long"),
   password: z.string().min(10, "Use at least 10 characters").max(128, "Password is too long"),
@@ -41,6 +47,37 @@ async function readJson(request: IncomingMessage, max = 32_000): Promise<unknown
   }
   try { return JSON.parse(Buffer.concat(parts).toString("utf8")); }
   catch { throw new AppError(400, "INVALID_JSON"); }
+}
+async function readRawBody(request: IncomingMessage, max: number): Promise<Buffer> {
+  let size = 0; const parts: Buffer[] = [];
+  for await (const chunk of request) {
+    const part = Buffer.from(chunk);
+    size += part.length;
+    if (size > max) throw new AppError(413, "REQUEST_TOO_LARGE");
+    parts.push(part);
+  }
+  return Buffer.concat(parts);
+}
+/** Minimal multipart/form-data reader: returns one named file part's bytes and declared content type. */
+function multipartFile(body: Buffer, contentType: string, fieldName: string): { data: Buffer; contentType: string } | undefined {
+  const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+  const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
+  if (!boundary) return undefined;
+  const delimiter = Buffer.from(`--${boundary}`);
+  const bounds: number[] = [];
+  for (let index = body.indexOf(delimiter); index !== -1; index = body.indexOf(delimiter, index + delimiter.length)) bounds.push(index);
+  for (let i = 0; i < bounds.length - 1; i++) {
+    const part = body.subarray(bounds[i]! + delimiter.length, bounds[i + 1]);
+    const headerEnd = part.indexOf("\r\n\r\n");
+    if (headerEnd === -1) continue;
+    const header = part.subarray(0, headerEnd).toString("utf8");
+    if (!new RegExp(`name="${fieldName}"`, "i").test(header)) continue;
+    const typeMatch = /content-type:\s*([^\r\n]+)/i.exec(header);
+    let data = part.subarray(headerEnd + 4);
+    if (data.length >= 2 && data.subarray(data.length - 2).toString("latin1") === "\r\n") data = data.subarray(0, data.length - 2);
+    return { data, contentType: typeMatch?.[1]?.trim() ?? "application/octet-stream" };
+  }
+  return undefined;
 }
 function sessionCookie(value: string, request: IncomingMessage) {
   const secure = request.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
@@ -88,7 +125,8 @@ async function serveFrontend(path: string, response: ServerResponse) {
 
 export function createApi(options: { geminiApiKey?: string; geminiModel?: string; geminiFetch?: Fetch; persistence?: MongoPersistence;
   liteApiKey?: string; serpApiKey?: string; staysFetch?: Fetch; payment?: PaymentGateway; allowAnonymousAccounts?: boolean;
-  autopilot?: AutopilotOptions; tigerUrl?: string; pulse?: Pulse } = {}) {
+  autopilot?: AutopilotOptions; tigerUrl?: string; pulse?: Pulse; solanaSigner?: KeyPairSigner; solana?: SolanaCommitmentsPort;
+  backboardApiKey?: string; backboardFetch?: Fetch; elevenLabsApiKey?: string; elevenLabsModel?: string; elevenLabsFetch?: Fetch } = {}) {
   const persistence = options.persistence;
   const model = new Gemini({ apiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY, model: options.geminiModel ?? process.env.GEMINI_MODEL, fetch: options.geminiFetch });
   const aiConfigured = Boolean((options.geminiApiKey ?? process.env.GEMINI_API_KEY) && (options.geminiModel ?? process.env.GEMINI_MODEL));
@@ -100,11 +138,22 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
   const tigerUrl = options.tigerUrl ?? process.env.TIGER_DATABASE_URL;
   const pulse = options.pulse ?? (tigerUrl ? new Pulse(createTigerPool(tigerUrl)) : undefined);
   const observe = pulse ? pulse.observe.bind(pulse) : undefined;
+  // Best-effort devnet commitment of the proposal hash; only attempted once an operator signer is configured.
+  const solana = options.solana ?? (options.solanaSigner ? new SolanaCommitments(options.solanaSigner) : undefined);
+  const solanaSignerConfigured = Boolean(solana);
+  const backboardApiKey = options.backboardApiKey ?? process.env.BACKBOARD_API_KEY;
+  const backboard = new Backboard({ apiKey: backboardApiKey, fetch: options.backboardFetch });
+  const elevenLabsApiKey = options.elevenLabsApiKey ?? process.env.ELEVENLABS_API_KEY;
+  const elevenLabsModel = options.elevenLabsModel ?? process.env.ELEVENLABS_MODEL ?? "scribe_v1";
+  const elevenLabsConfigured = Boolean(elevenLabsApiKey && elevenLabsModel);
+  const elevenLabs = new ElevenLabs({ apiKey: elevenLabsApiKey, model: elevenLabsModel, fetch: options.elevenLabsFetch });
   const providers = {
     ...(liteApiKey ? { liteApi: new LiteApi(liteApiKey, options.staysFetch, observe) } : {}),
     ...(serpApiKey ? { google: new GoogleHotels(serpApiKey, options.staysFetch, observe) } : {}),
     ...(payment ? { payment } : {}),
     ...(pulse ? { pulse } : {}),
+    ...(solana ? { solana } : {}),
+    backboard,
     ...(aiConfigured ? { summarize: async (facts: unknown) => {
       const result = await model.generate({ input: z.unknown(), output: z.object({ summary: z.string().max(400) }).strict() }, facts,
         "Write one or two plain sentences (max 45 words) telling a group of friends what this stay is like, using only the supplied public listing facts. No names of group members, no budgets, no invented facts, no marketing language.");
@@ -129,6 +178,62 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       return result.status === "OK" ? result.value.data.destinations : undefined;
     } } : {}),
   };
+  /** Shared structured-confirmation intake pipeline: text and voice transcripts both land here, and nothing is saved before the member confirms. */
+  async function runIntake(room: Room, messages: Array<z.infer<typeof intakeMessage>>) {
+    if (messages.length % 2 !== 1 || messages.some((entry, index) => entry.role !== (index % 2 === 0 ? "user" : "assistant"))) throw new AppError(422, "INVALID_CONVERSATION");
+    if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
+    const today = localDay(new Date().toISOString());
+    const planning = room.plan && !room.trip ? { earliest: addDays(today, 1), latest: addDays(today, PLANNING_HORIZON_DAYS) } : undefined;
+    const planningInstruction = planning
+      ? ` This group has not picked a destination, dates or trip length yet; Accord works them out from everyone's private answers. Today is ${today}. You already opened with: "Hey. Glad you’re here. What kind of trip sounds good?" The member’s messages are the rest of that chat. Also extract, only when they say them: availability as day ranges they can travel (from = earliest day they could leave home, to = latest day they could be back) between ${planning.earliest} and ${planning.latest}; nights; leavingFrom; tripStyles from BEACH, MOUNTAINS, SKI, CITY, NATURE, THEME_PARKS, LAKE; placeIdeas; placesToAvoid. Dates, trip length, departure, trip styles and places are never unsupported requirements. Never invent any of them. In this chat, learn a spending amount and when they are free, then optionally trip length, where they are leaving from, and places they’d love or skip. One warm question at a time, only for something they have not already said. If they say that’s all, stop the optional questions. Accord still needs SOME availability range to search, so treat dates differently from the other optional fields: if the member says they have no date preference, are flexible, or any time works, do NOT omit availability — set it to a single range covering the entire window from ${planning.earliest} to ${planning.latest}, and do not ask them again.`
+      : "";
+    const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), planning: z.object({ earliest: z.string(), latest: z.string() }).strict().optional(), messages: z.array(intakeMessage) }).strict(), output: ExtractionSchema },
+      { roomGoal: room.goal, timeZone: "America/New_York", ...(planning ? { planning } : {}), messages },
+      "You are in a private chat, not filling a form. Extract what the member actually said. An explicit personal spending maximum goes in maxContributionCents: $350 means 35000 cents; never omit an explicit maximum and never invent a missing one. All fields except the spending maximum are optional. If they say they do not care, have no preference, or any date/time works, omit that field and do not ask again. Date-only availability belongs in earliestCheckInDate, latestCheckInDate, and latestCheckOutDate as YYYY-MM-DD. Never invent a clock time for a date-only statement. Only use earliestCheckInAt, latestCheckInAt, or latestCheckOutAt when they explicitly state a clock time. A walkable/quiet/near-activities/low-price wish is a soft preference, not an unsupported hard requirement. Only list a hard requirement as unsupported when none of the supported fields can represent it. When you still need to ask something, put exactly one short, warm question in ambiguities. That question is shown to them word for word, so write it the way you’d say it out loud. Never say “maximum amount you are willing to contribute” and never mention cents. If you have what you need, or they said that’s all, leave ambiguities empty. Resolve relative dates only from supplied dates; otherwise ask for the calendar date. Express every explicit date/time as the requested WALL CLOCK in America/New_York with a numeric offset, for example 2027-03-14T12:00:00-04:00. NEVER return a Z/UTC timestamp. The latest member answer may revise earlier statements. Never infer a private reason. This is an unconfirmed draft, never permission to spend." + planningInstruction);
+    if (result.status !== "OK") throw new AppError(503, "AI_UNAVAILABLE");
+    const extraction = respectExplicitOptionality(result.value.data, messages.at(-1)!.content);
+    const triage = triageExtraction(extraction);
+    const tripAnswers = planning && planningAnswers(extraction.proposed, planning);
+    const finished = /\b(that'?s all|that'?s it|nothing else|i'?m done|all set|no more|that is all)\b/i.test(messages.at(-1)!.content);
+    const needsBudget = extraction.proposed.maxContributionCents === undefined;
+    const needsDates = !!tripAnswers && !tripAnswers.availability;
+    const askingAgainForDates = !!tripAnswers?.availability?.length && !!triage.blocking && /free|date|when/i.test(triage.blocking);
+    // The model writes the next line. These two only fire if it forgot a required piece and asked nothing.
+    if (!(finished && !needsBudget && !needsDates) && triage.blocking && !askingAgainForDates) return { stage: "CLARIFYING" as const, reply: triage.blocking };
+    if (needsBudget) return { stage: "CLARIFYING" as const, reply: "What’s a comfortable amount for you to spend? A rough number is fine." };
+    if (needsDates) return { stage: "CLARIFYING" as const, reply: "When are you free? A rough stretch is fine." };
+    let earliestCheckInAt: string | undefined, latestCheckInAt: string | undefined, latestCheckOutAt: string | undefined;
+    try {
+      earliestCheckInAt = extraction.proposed.earliestCheckInAt
+        ? normalizeModelCheckout(extraction.proposed.earliestCheckInAt) : undefined;
+      latestCheckInAt = extraction.proposed.latestCheckInAt
+        ? normalizeModelCheckout(extraction.proposed.latestCheckInAt) : undefined;
+      latestCheckOutAt = extraction.proposed.latestCheckOutAt
+        ? normalizeModelCheckout(extraction.proposed.latestCheckOutAt) : undefined;
+    } catch {
+      return { stage: "CLARIFYING" as const, reply: "Please confirm the exact check-in or checkout date and time in Eastern Time." };
+    }
+    if (earliestCheckInAt && latestCheckInAt && Date.parse(earliestCheckInAt) > Date.parse(latestCheckInAt)) {
+      return { stage: "CLARIFYING" as const, reply: "Your earliest check-in is after your latest check-in. What exact check-in window should Accord use?" };
+    }
+    const constraints = ConstraintsSchema.parse({
+      maxContributionCents: extraction.proposed.maxContributionCents,
+      earliestCheckInDate: extraction.proposed.earliestCheckInDate,
+      latestCheckInDate: extraction.proposed.latestCheckInDate,
+      latestCheckOutDate: extraction.proposed.latestCheckOutDate,
+      earliestCheckInAt,
+      latestCheckInAt,
+      latestCheckOutAt,
+      requiresFullCashRefund: extraction.proposed.requiresFullCashRefund ?? false,
+      requiresStepFreeAccess: extraction.proposed.requiresStepFreeAccess ?? false,
+      softPreference: extraction.proposed.softPreferences?.map(item => item.kind.toLowerCase().replaceAll("_", " ")).join(", ") ?? "",
+      ...tripAnswers,
+    });
+    const reply = triage.notChecked.length
+      ? "I have a draft for you to review. Some of what you mentioned isn't something Accord can check for a stay, so it isn't part of the draft. Nothing has been applied yet."
+      : "I have a draft for you to review. Nothing has been applied yet.";
+    return { stage: "REVIEW" as const, reply, constraints, requiresConfirmation: true, followUps: triage.followUps, notChecked: triage.notChecked };
+  }
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
   const autopilot: AutopilotOptions = { enabled: process.env.ACCORD_AUTOPILOT !== "off", ...options.autopilot };
   let state = new AccordState(persistence, providers, autopilot);
@@ -139,10 +244,10 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
       const method = request.method ?? "GET";
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (method === "GET" && path === "/api/health") {
-        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "CONFIGURED" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", cybersource: payment ? "SANDBOX_CONFIGURED" : "UNCONFIGURED", tiger: pulse ? (await pulse.ping() ? "UP" : "DOWN") : "UNCONFIGURED", solana: "UNCONFIGURED", backboard: "UNCONFIGURED", elevenlabs: "UNCONFIGURED" }); return;
+        await send(200, { app: "UP", mongo: persistence ? (await persistence.ping() ? "UP" : "DOWN") : "UNCONFIGURED", ai: aiConfigured ? "CONFIGURED" : "UNCONFIGURED", liteapi: liteApiKey ? "CONFIGURED" : "UNCONFIGURED", googleHotels: serpApiKey ? "CONFIGURED" : "UNCONFIGURED", cybersource: payment ? "SANDBOX_CONFIGURED" : "UNCONFIGURED", tiger: pulse ? (await pulse.ping() ? "UP" : "DOWN") : "UNCONFIGURED", solana: solanaSignerConfigured ? "CONFIGURED" : "UNCONFIGURED", backboard: backboardApiKey ? "CONFIGURED" : "UNCONFIGURED", elevenlabs: elevenLabsConfigured ? "CONFIGURED" : "UNCONFIGURED" }); return;
       }
       if (method === "GET" && path === "/api/capabilities") {
-        await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: false }, backboard: { available: false }, tiger: { available: !!pulse }, autopilot: { available: autopilot.enabled !== false }, liveSearch: { available: Boolean(liteApiKey || serpApiKey) } }); return;
+        await send(200, { ai: { available: aiConfigured }, elevenLabs: { available: elevenLabsConfigured }, backboard: { available: Boolean(backboardApiKey) }, tiger: { available: !!pulse }, autopilot: { available: autopilot.enabled !== false }, liveSearch: { available: Boolean(liteApiKey || serpApiKey) } }); return;
       }
       if (method === "POST" && path === "/api/auth/register") {
         const input = credentials.extend({ displayName: z.string().trim().min(1).max(60) }).parse(await readJson(request));
@@ -242,61 +347,8 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           state.beginSolveWhenReady(room); return;
         }
         if (route === "me/intake/extract" && method === "POST") {
-          const message = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(1000) }).strict();
-          const { messages } = z.object({ messages: z.array(message).min(1).max(24) }).strict().parse(await readJson(request));
-          if (messages.length % 2 !== 1 || messages.some((entry, index) => entry.role !== (index % 2 === 0 ? "user" : "assistant"))) throw new AppError(422, "INVALID_CONVERSATION");
-          if (!aiConfigured) throw new AppError(503, "AI_UNAVAILABLE");
-          const today = localDay(new Date().toISOString());
-          const planning = room.plan && !room.trip ? { earliest: addDays(today, 1), latest: addDays(today, PLANNING_HORIZON_DAYS) } : undefined;
-          const planningInstruction = planning
-            ? ` This group has not picked a destination, dates or trip length yet; Accord works them out from everyone's private answers. Today is ${today}. You already opened with: "Hey. Glad you’re here. What kind of trip sounds good?" The member’s messages are the rest of that chat. Also extract, only when they say them: availability as day ranges they can travel (from = earliest day they could leave home, to = latest day they could be back) between ${planning.earliest} and ${planning.latest}; nights; leavingFrom; tripStyles from BEACH, MOUNTAINS, SKI, CITY, NATURE, THEME_PARKS, LAKE; placeIdeas; placesToAvoid. Dates, trip length, departure, trip styles and places are never unsupported requirements. Never invent any of them. In this chat, learn a spending amount and when they are free, then optionally trip length, where they are leaving from, and places they’d love or skip. One warm question at a time, only for something they have not already said. If they say that’s all, stop the optional questions.`
-            : "";
-          const result = await model.generate({ input: z.object({ roomGoal: z.string(), timeZone: z.string(), planning: z.object({ earliest: z.string(), latest: z.string() }).strict().optional(), messages: z.array(message) }).strict(), output: ExtractionSchema },
-            { roomGoal: room.goal, timeZone: "America/New_York", ...(planning ? { planning } : {}), messages },
-            "You are in a private chat, not filling a form. Extract what the member actually said. An explicit personal spending maximum goes in maxContributionCents: $350 means 35000 cents; never omit an explicit maximum and never invent a missing one. All fields except the spending maximum are optional. If they say they do not care, have no preference, or any date/time works, omit that field and do not ask again. Date-only availability belongs in earliestCheckInDate, latestCheckInDate, and latestCheckOutDate as YYYY-MM-DD. Never invent a clock time for a date-only statement. Only use earliestCheckInAt, latestCheckInAt, or latestCheckOutAt when they explicitly state a clock time. A walkable/quiet/near-activities/low-price wish is a soft preference, not an unsupported hard requirement. Only list a hard requirement as unsupported when none of the supported fields can represent it. When you still need to ask something, put exactly one short, warm question in ambiguities. That question is shown to them word for word, so write it the way you’d say it out loud. Never say “maximum amount you are willing to contribute” and never mention cents. If you have what you need, or they said that’s all, leave ambiguities empty. Resolve relative dates only from supplied dates; otherwise ask for the calendar date. Express every explicit date/time as the requested WALL CLOCK in America/New_York with a numeric offset, for example 2027-03-14T12:00:00-04:00. NEVER return a Z/UTC timestamp. The latest member answer may revise earlier statements. Never infer a private reason. This is an unconfirmed draft, never permission to spend." + planningInstruction);
-          if (result.status !== "OK") throw new AppError(503, "AI_UNAVAILABLE");
-          const extraction = respectExplicitOptionality(result.value.data, messages.at(-1)!.content);
-          const triage = triageExtraction(extraction);
-          const tripAnswers = planning && planningAnswers(extraction.proposed, planning);
-          const finished = /\b(that'?s all|that'?s it|nothing else|i'?m done|all set|no more|that is all)\b/i.test(messages.at(-1)!.content);
-          const needsBudget = extraction.proposed.maxContributionCents === undefined;
-          const needsDates = !!tripAnswers && !tripAnswers.availability;
-          const askingAgainForDates = !!tripAnswers?.availability?.length && !!triage.blocking && /free|date|when/i.test(triage.blocking);
-          // Gemini writes the next line. These two only fire if it forgot a required piece and asked nothing.
-          if (!(finished && !needsBudget && !needsDates) && triage.blocking && !askingAgainForDates) { await send(200, { stage: "CLARIFYING", reply: triage.blocking }); return; }
-          if (needsBudget) { await send(200, { stage: "CLARIFYING", reply: "What’s a comfortable amount for you to spend? A rough number is fine." }); return; }
-          if (needsDates) { await send(200, { stage: "CLARIFYING", reply: "When are you free? A rough stretch is fine." }); return; }
-          let earliestCheckInAt: string | undefined, latestCheckInAt: string | undefined, latestCheckOutAt: string | undefined;
-          try {
-            earliestCheckInAt = extraction.proposed.earliestCheckInAt
-              ? normalizeModelCheckout(extraction.proposed.earliestCheckInAt) : undefined;
-            latestCheckInAt = extraction.proposed.latestCheckInAt
-              ? normalizeModelCheckout(extraction.proposed.latestCheckInAt) : undefined;
-            latestCheckOutAt = extraction.proposed.latestCheckOutAt
-              ? normalizeModelCheckout(extraction.proposed.latestCheckOutAt) : undefined;
-          } catch {
-            await send(200, { stage: "CLARIFYING", reply: "Please confirm the exact check-in or checkout date and time in Eastern Time." }); return;
-          }
-          if (earliestCheckInAt && latestCheckInAt && Date.parse(earliestCheckInAt) > Date.parse(latestCheckInAt)) {
-            await send(200, { stage: "CLARIFYING", reply: "Your earliest check-in is after your latest check-in. What exact check-in window should Accord use?" }); return;
-          }
-          const constraints = ConstraintsSchema.parse({
-            maxContributionCents: extraction.proposed.maxContributionCents,
-            earliestCheckInDate: extraction.proposed.earliestCheckInDate,
-            latestCheckInDate: extraction.proposed.latestCheckInDate,
-            latestCheckOutDate: extraction.proposed.latestCheckOutDate,
-            earliestCheckInAt,
-            latestCheckInAt,
-            latestCheckOutAt,
-            requiresFullCashRefund: extraction.proposed.requiresFullCashRefund ?? false,
-            requiresStepFreeAccess: extraction.proposed.requiresStepFreeAccess ?? false,
-            softPreference: extraction.proposed.softPreferences?.map(item => item.kind.toLowerCase().replaceAll("_", " ")).join(", ") ?? "",
-            ...tripAnswers,
-          });
-          const reply = triage.notChecked.length
-            ? "I have a draft for you to review. Some of what you mentioned isn't something Accord can check for a stay, so it isn't part of the draft. Nothing has been applied yet."
-            : "I have a draft for you to review. Nothing has been applied yet.";
-          await send(200, { stage: "REVIEW", reply, constraints, requiresConfirmation: true, followUps: triage.followUps, notChecked: triage.notChecked }); return;
+          const { messages } = z.object({ messages: z.array(intakeMessage).min(1).max(24) }).strict().parse(await readJson(request));
+          await send(200, await runIntake(room, messages)); return;
         }
         if (route === "me/inbox" && method === "GET") { await send(200, state.inbox(member)); return; }
         const respondMatch = /^me\/inbox\/([^/]+)\/respond$/.exec(route);
@@ -343,6 +395,12 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           await send(200, explanation); return;
         }
         if (route === "events" && method === "GET") { await send(200, { events: room.events.slice(-100) }); return; }
+        // Room-scoped slice of the public Tiger dashboard: how many live prices Accord has checked for this exact trip.
+        if (route === "pulse" && method === "GET") {
+          if (!pulse || !room.trip) throw new AppError(503, "TIGER_UNAVAILABLE");
+          try { await send(200, { source: "TIGER", ...(await pulse.roomActivity(room.trip)) }); } catch { throw new AppError(503, "TIGER_UNAVAILABLE"); }
+          return;
+        }
         if (route === "events/stream" && method === "GET") { await state.streams.connect(request, response, roomId, "public"); return; }
         if (route === "me/events/stream" && method === "GET") { await state.streams.connect(request, response, roomId, "private"); return; }
         if (route === "receipt" && method === "GET") { await send(200, state.receipt(room)); return; }
@@ -357,7 +415,16 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
           const offer = await state.mutate(input.offerId, input.expectedOfferVersion, input.mutation);
           await send(200, { offerId: offer.offerId, offerVersion: offer.offerVersion }); return;
         }
-        if (route === "me/memories" && method === "GET") throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+        if (route === "me/memories" && method === "GET") { await send(200, await state.memories(session, member)); return; }
+        if (route === "me/memories" && method === "POST") {
+          const input = z.object({ preference: z.enum(["WALKABLE", "QUIET", "NEAR_ACTIVITIES", "REFUNDABLE"]), confirmed: z.literal(true) }).strict().parse(await readJson(request));
+          await send(200, await state.rememberPreference(session, member, input.preference)); return;
+        }
+        const memoryApplyMatch = /^me\/memories\/([^/]+)\/apply$/.exec(route);
+        if (memoryApplyMatch && method === "POST") {
+          z.object({ confirmed: z.literal(true) }).strict().parse(await readJson(request));
+          await send(200, await state.applyMemory(session, member, roomParam(memoryApplyMatch[1]!))); return;
+        }
       }
       const proposalMatch = proposalPattern.exec(path);
       if (proposalMatch) {
@@ -429,7 +496,20 @@ export function createApi(options: { geminiApiKey?: string; geminiModel?: string
         try { history = await pulse.offerHistory(room.trip, proposal.snapshot.offer.offerId); } catch { throw new AppError(503, "TIGER_UNAVAILABLE"); }
         await send(200, { source: "TIGER", points: history.map(point => ({ at: point.at, totalCents: point.totalCents, label: proposal.snapshot.offer.propertyName })) }); return;
       }
-      if (path === "/api/intake/transcribe" && method === "POST") throw new AppError(503, "ELEVENLABS_UNAVAILABLE");
+      if (path === "/api/intake/transcribe" && method === "POST") {
+        sessionRequired(state, request);
+        if (!elevenLabsConfigured) throw new AppError(503, "ELEVENLABS_UNAVAILABLE");
+        const contentType = String(request.headers["content-type"] ?? "");
+        if (!/^multipart\/form-data/i.test(contentType)) throw new AppError(422, "INVALID_AUDIO_UPLOAD");
+        const raw = await readRawBody(request, 21 * 1024 * 1024);
+        const file = multipartFile(raw, contentType, "audio");
+        if (!file) throw new AppError(422, "INVALID_AUDIO_UPLOAD");
+        const transcribed = await elevenLabs.transcribe(new Blob([new Uint8Array(file.data)], { type: file.contentType }));
+        if (transcribed.status !== "OK") throw new AppError(transcribed.code === "NO_SPEECH_DETECTED" ? 422 : 503, transcribed.code === "NO_SPEECH_DETECTED" ? "EMPTY_TRANSCRIPT" : "ELEVENLABS_UNAVAILABLE");
+        const transcript = transcribed.value.text.trim().slice(0, 1000);
+        if (!transcript) throw new AppError(422, "EMPTY_TRANSCRIPT");
+        await send(200, { transcript }); return;
+      }
       if (method === "GET" && !path.startsWith("/api/")) { await serveFrontend(path, response); return; }
       throw new AppError(404, "NOT_FOUND");
     } catch (error) {
@@ -470,7 +550,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.exit(1);
     }
   }
-  const { server, state } = createApi({ persistence });
+  let solanaSigner: KeyPairSigner | undefined;
+  if (process.env.SOLANA_SIGNER_SECRET_KEY) {
+    try { solanaSigner = await signerFromSecret(process.env.SOLANA_SIGNER_SECRET_KEY); }
+    catch (error) { process.stderr.write(`SOLANA_SIGNER_SECRET_KEY could not be parsed (${(error as Error).message}); Solana commitments stay unconfigured.\n`); }
+  }
+  const { server, state } = createApi({ persistence, solanaSigner });
   await state.ready;
   const port = Number(process.env.PORT ?? "3000");
   server.listen(port, "0.0.0.0", () => process.stdout.write(`Accord API listening on ${port} (state: ${persistence ? "MongoDB" : "memory only"})\n`));

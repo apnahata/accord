@@ -1,8 +1,14 @@
-import { useId, useMemo, useState, type PointerEvent } from 'react';
+import { useId, useMemo, useState, type PointerEvent, type ReactNode } from 'react';
+import { Radar } from 'lucide-react';
 
 // Categorical slots (fixed order, validated for CVD + contrast on the #fffefa panel surface). Text never uses these.
 export const SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100'];
 const time = (at: string) => new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+
+/** A chart's empty state should explain what will appear and why — never a bare gray sentence that reads as a rendering failure. */
+export function ChartEmpty({ icon: Icon = Radar, title, children }: { icon?: typeof Radar; title: string; children: ReactNode }) {
+  return <div className="empty chart-empty"><span className="icon-circle"><Icon size={20} /></span><h3>{title}</h3><p>{children}</p></div>;
+}
 
 /** Tiny single-series price line for an offer card. Hover a point for its value. */
 export function Sparkline({ points, format }: { points: Array<{ at: string; value: number }>; format: (value: number) => string }) {
@@ -41,7 +47,9 @@ export function LineChart({ series, format, label }: { series: Series[]; format:
     const v0 = Math.floor(Math.min(...values) / step) * step, v1 = Math.ceil(Math.max(...values) / step) * step || step;
     return { t0, t1: t1 === t0 ? t0 + 1 : t1, v0, v1: v1 === v0 ? v0 + step : v1, step };
   }, [all]);
-  if (!layout) return <p className="subtle">No observations yet. Run a live search to start recording prices.</p>;
+  if (!layout) return <figure className="chart"><figcaption className="sr-only">{label}</figcaption>
+    <ChartEmpty title="Recording starts the moment a price is checked.">Every price a provider returns is written to Tiger Data immediately. This line fills in as soon as the first live search runs — nothing to configure, nothing broken.</ChartEmpty>
+  </figure>;
   const x = (at: string) => left + ((Date.parse(at) - layout.t0) / (layout.t1 - layout.t0)) * (w - left - right);
   const y = (v: number) => top + (1 - (v - layout.v0) / (layout.v1 - layout.v0)) * (h - top - bottom);
   const ticks: number[] = []; for (let v = layout.v0; v <= layout.v1 + 1e-9; v += layout.step) ticks.push(v);
@@ -78,7 +86,8 @@ export function LineChart({ series, format, label }: { series: Series[]; format:
 }
 
 /** Horizontal bars for a small ordered funnel (single hue, labels at the tip). */
-export function FunnelBars({ steps }: { steps: Array<{ label: string; value: number }> }) {
+export function FunnelBars({ steps, emptyTitle, children }: { steps: Array<{ label: string; value: number }>; emptyTitle?: string; children?: ReactNode }) {
+  if (steps.every(step => step.value === 0)) return <ChartEmpty title={emptyTitle ?? 'No activity in this window yet.'}>{children ?? 'Each stage records the moment it happens — this fills in as soon as the first group moves through it.'}</ChartEmpty>;
   const max = Math.max(1, ...steps.map(s => s.value));
   return <ol className="funnel-bars">{steps.map(step => <li key={step.label} title={`${step.label}: ${step.value}`}>
     <span className="funnel-label">{step.label}</span>

@@ -166,3 +166,5 @@ export type PulseDTO = {
   consensus: { proposals: number; ready: number; stale: number; booked: number; medianMinutesToReady?: number; medianSecondsStaleToReplan?: number; medianStaleDetectionMs?: number };
   activity: Array<{ at: string; counts: Record<string, number> }>;
 };
+/** Room-scoped slice of the same Tiger telemetry: how many live prices Accord has checked for this room's exact trip. */
+export type RoomPulseDTO = { source: 'TIGER'; observations: number; listings: number };

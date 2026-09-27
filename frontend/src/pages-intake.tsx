@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Check } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Sparkles } from 'lucide-react';
 import { Button, ErrorNotice, Loading } from './components';
 import { money, post, segment } from './api';
 import { useAction, useResource } from './hooks';
@@ -12,6 +12,21 @@ type ConversationMessage = { role: 'user' | 'assistant'; content: string };
 type IntakeReply = { stage: 'CLARIFYING' | 'REVIEW'; reply: string; constraints?: Constraints; requiresConfirmation?: boolean; notChecked?: string[] };
 const greeting = 'Hey. Glad you’re here. What kind of trip sounds good?';
 
+type MemoryPreference = 'WALKABLE' | 'QUIET' | 'NEAR_ACTIVITIES' | 'REFUNDABLE';
+const MEMORY_PROMPT_LABELS: Record<MemoryPreference, string> = {
+  WALKABLE: 'walkable neighborhoods', QUIET: 'quiet properties', NEAR_ACTIVITIES: 'staying near activities', REFUNDABLE: 'refundable options',
+};
+/** Best-effort match from what the member just confirmed. Never invents a preference they didn't state. */
+function matchMemoryPreferences(constraints: Constraints): MemoryPreference[] {
+  const text = (constraints.softPreference || '').toLowerCase();
+  const matches: MemoryPreference[] = [];
+  if (/\bwalk/.test(text)) matches.push('WALKABLE');
+  if (/\bquiet|\bpeaceful|\bcalm/.test(text)) matches.push('QUIET');
+  if (/\bactivit/.test(text)) matches.push('NEAR_ACTIVITIES');
+  if (constraints.requiresFullCashRefund) matches.push('REFUNDABLE');
+  return matches;
+}
+
 export function TripChat({ roomPath, onSaved }: { roomPath: string; onSaved: () => void }) {
   const capabilities = useResource<Capabilities>('/capabilities');
   const action = useAction();
@@ -20,6 +35,8 @@ export function TripChat({ roomPath, onSaved }: { roomPath: string; onSaved: () 
   const [draft, setDraft] = useState<Constraints>();
   const [leftOut, setLeftOut] = useState<string[]>([]);
   const [voiceError, setVoiceError] = useState<Error>();
+  const [rememberPrompts, setRememberPrompts] = useState<MemoryPreference[]>();
+  const [rememberedIds, setRememberedIds] = useState<Set<MemoryPreference>>(new Set());
   const log = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLFormElement>(null);
   useEffect(() => {
@@ -47,11 +64,30 @@ export function TripChat({ roomPath, onSaved }: { roomPath: string; onSaved: () 
   function save(constraints: Constraints) {
     return action.run(async () => {
       await post(roomPath + '/me/constraints', { ...constraints, confirmed: true });
-      onSaved();
+      const matches = capabilities.data?.backboard.available ? matchMemoryPreferences(constraints) : [];
+      if (matches.length) setRememberPrompts(matches);
+      else onSaved();
     });
   }
 
   if (capabilities.loading && !messages.length) return <Loading />;
+  if (rememberPrompts) return <section className="step-card">
+    <p className="step-from"><Sparkles size={14} />Accord</p>
+    <h2>Should Accord remember any of this?</h2>
+    <ul className="memory-list">{rememberPrompts.map(preference => <li key={preference}>
+      <div><strong>Remember {MEMORY_PROMPT_LABELS[preference]} for future trips?</strong></div>
+      {rememberedIds.has(preference)
+        ? <Check size={19} />
+        : <div className="button-row"><Button className="secondary small" disabled={action.busy} onClick={() => action.run(async () => {
+            await post(roomPath + '/me/memories', { preference, confirmed: true });
+            setRememberedIds(previous => new Set(previous).add(preference));
+          })}>Remember</Button>
+          <Button className="secondary small" onClick={() => setRememberPrompts(previous => previous?.filter(item => item !== preference))}>Not this trip</Button>
+        </div>}
+    </li>)}</ul>
+    <div className="step-action"><Button onClick={onSaved}>Continue<ArrowRight size={16} /></Button></div>
+    <ErrorNotice error={action.error} />
+  </section>;
   if (draft) return <section className="step-card">
     <div className="conversation-log" aria-live="polite">
       <div className="conversation-message"><strong>Accord</strong><p>Here’s what I heard. {heard(draft)}</p></div>
