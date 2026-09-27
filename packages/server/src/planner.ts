@@ -48,6 +48,27 @@ const MAX_DESTINATIONS = 3, MAX_SEARCHES = 6;
 const styleLabel: Record<TripStyle, string> = { BEACH: "beach", MOUNTAINS: "mountains", SKI: "ski", CITY: "city", NATURE: "nature", THEME_PARKS: "theme parks", LAKE: "lake" };
 const list = (items: string[]) => items.length <= 2 ? items.join(" and ") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 const validZone = (zone: string) => { try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); return true; } catch { return false; } };
+// A specific place ("Reno, NV", "Ohio") is worth forcing back onto the shortlist if the model drops it;
+// a vague wish ("somewhere warm") is not a searchable destination and would just fail every search.
+const looksLikeAPlace = (text: string) => /^[A-Z]/.test(text) && !/\b(somewhere|anywhere|someplace|any\s?place)\b/i.test(text);
+const US_STATES: Record<string, string> = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware",
+  FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky",
+  LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri",
+  MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina",
+  ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina",
+  SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia",
+  WI: "Wisconsin", WY: "Wyoming", DC: "District of Columbia",
+};
+// A suggested "City, ST" already covers an idea like "LA" (city initials) or "Ohio" (the state it's in),
+// even though `mentions` alone won't see it: neither is in the internal catalog `mentions` knows about.
+function alreadyCovers(idea: string, suggestionName: string): boolean {
+  if (mentions(idea, suggestionName)) return true;
+  const [city = "", abbreviation = ""] = suggestionName.split(",").map(part => part.trim());
+  const initials = city.split(/\s+/).map(word => word[0] ?? "").join("").toUpperCase();
+  const stateName = US_STATES[abbreviation.toUpperCase()];
+  return initials === idea.trim().toUpperCase() || (!!stateName && idea.trim().toLowerCase() === stateName.toLowerCase());
+}
 
 /**
  * Decides where and when for a group that hasn't. Dates come from a deterministic overlap of everyone's
@@ -288,7 +309,12 @@ export class Planner {
         .map(idea => ({ name: idea.name.trim(), timeZone: validZone(idea.timeZone) ? idea.timeZone : "America/New_York", why: idea.why.trim().slice(0, 160), styles: idea.styles }))
         .filter((idea, index, all) => idea.name.length >= 2 && !ruledOut(idea.name) && all.findIndex(other => other.name.toLowerCase() === idea.name.toLowerCase()) === index)
         .slice(0, MAX_DESTINATIONS);
-      if (suggested.length) return { ideas: suggested, source: "AI" as const };
+      // The model can silently drop a specific place someone asked for; never let its judgment override an
+      // explicit request. Anything it left out (and no one else ruled out) is added back as its own real
+      // candidate, using the member's own words, so it gets an actual search and a real vote.
+      const missed = ideas.filter(idea => looksLikeAPlace(idea) && !ruledOut(idea) && !suggested.some(item => alreadyCovers(idea, item.name)));
+      const forced = missed.map(idea => ({ name: idea, timeZone: "America/New_York", why: "Someone in the group asked to go here.", styles: [] as TripStyle[] }));
+      if (suggested.length || forced.length) return { ideas: [...suggested, ...forced], source: "AI" as const };
     }
     const months = [...new Set(windows.flatMap(window => [window.checkIn, window.checkOut]).map(day => Number(day.slice(5, 7))))];
     const ranked = rankDestinations({ region: regionFor(from), styleCounts, ideas, avoid, from, months }, MAX_DESTINATIONS);

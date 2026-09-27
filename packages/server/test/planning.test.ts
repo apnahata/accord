@@ -286,6 +286,34 @@ test("a single workable trip is chosen without a vote, and the host can reopen p
   assert.equal(state.roomDTO(room, alex.id).planning!.stage, "PLANNING");
 });
 
+test("an explicit destination wish the model drops is added back as a real candidate, without naming who asked", async () => {
+  const { state, room, alex, priya } = plannedState(async () => [
+    { name: "Miami, FL", timeZone: "America/New_York", styles: ["BEACH"], why: "Beaches." },
+    { name: "Boston, MA", timeZone: "America/New_York", styles: ["CITY"], why: "Close by." },
+  ]);
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, tripStyles: ["BEACH"], placeIdeas: "Reno, NV" }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["CITY"] }));
+  await state.autopilot.planNow(room);
+  const view = state.roomDTO(room, alex.id).planning!;
+  const reno = view.destinations.find(item => item.name === "Reno, NV");
+  assert.ok(reno, "the model's own list left it out, but it must still become a real option");
+  assert.ok(view.options.some(option => option.destination === "Reno, NV"), "it must actually be searched, not just listed");
+  assert.ok(!reno!.why.toLowerCase().includes("alex"), "the reason must never say whose idea it was");
+  assert.equal(view.destinations.length, 3, "the model's two picks are kept alongside the restored one");
+});
+
+test("a resolved abbreviation or state already on the model's list is recognized, not duplicated", async () => {
+  const { state, room, alex, priya } = plannedState(async () => [
+    { name: "Los Angeles, CA", timeZone: "America/Los_Angeles", styles: ["CITY"], why: "A big city trip." },
+    { name: "Columbus, OH", timeZone: "America/New_York", styles: ["CITY"], why: "A big city trip." },
+  ]);
+  state.confirmConstraints(room, alex, ConstraintsSchema.parse({ ...base, tripStyles: ["CITY"], placeIdeas: "LA" }));
+  state.confirmConstraints(room, priya, ConstraintsSchema.parse({ ...base, tripStyles: ["CITY"], placeIdeas: "Ohio" }));
+  await state.autopilot.planNow(room);
+  const names = state.roomDTO(room, alex.id).planning!.destinations.map(item => item.name);
+  assert.deepEqual(names, ["Los Angeles, CA", "Columbus, OH"], "the model already resolved both ideas to real cities; nothing duplicate should be forced in");
+});
+
 test("rehearsal stays are deterministic and cover the trip exactly", async () => {
   const { demoStays } = await import("../src/demo-stays.js");
   const trip = { destination: "Stowe, VT", countryCode: "US", checkIn: day(40), checkOut: day(43), guests: 4, timeZone: "America/New_York" };
