@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Clock3, LockKeyhole, MapPin, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Clock3, LockKeyhole, MapPin, RefreshCw, ShieldCheck, Users, Zap } from 'lucide-react';
 import { Button, CheckStatus, Empty, ErrorNotice, Funding, Integrity, LinkButton, Loading, OfferCard, OfferFacts, PageHeading, PrivateNote, Stability, Stale, StayArt, Tag, Timeline } from './components';
 import { api, ApiError, date, dateTime, money, post, segment } from './api';
 import { PrivateExplanationCard, PublicExplanationCard } from './explanations';
 import { useAction, useResource, useRoomEvents } from './hooks';
 import { AutopilotBanner, Inbox, WatchLine } from './autopilot';
 import { DecidedTrip, PlanningBoard, planSummary } from './planning';
-import type { AnalyticsDTO, ConsentResponseDTO, EventDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO } from './contracts';
+import type { AnalyticsDTO, Capabilities, ConsentResponseDTO, EventDTO, MerchantDTO, OffersDTO, PrivateProposalEnvelope, ProposalEnvelope, PublicRoomDTO, ReceiptDTO, RoomPulseDTO } from './contracts';
 import type { MerchantMutation } from '@accord/domain';
 
 function RoomNav({ roomId, active }: { roomId: string; active: 'room' | 'offers' }) { return <nav className="room-nav" aria-label="Group navigation"><Link aria-current={active === 'room' ? 'page' : undefined} to={`/rooms/${segment(roomId)}`}>Our group</Link><Link aria-current={active === 'offers' ? 'page' : undefined} to={`/rooms/${segment(roomId)}/offers`}>Explore stays</Link><Link to={`/rooms/${segment(roomId)}/me/summary`}><LockKeyhole size={14} />My private space</Link></nav>; }
@@ -25,11 +25,34 @@ function Members({ room, base, onChange }: { room: PublicRoomDTO; base: string; 
   return <section className="panel members-panel">
     <div className="section-heading"><h3>Who’s here</h3><span className="eyebrow">{room.memberCount} {room.memberCount === 1 ? 'member' : 'members'}</span></div>
     <ul className="member-list">{room.members.map(member => <li key={member.id}><span className={`member-status ${member.ready ? 'ready' : ''}`} aria-hidden="true">{member.ready ? <Check size={13} /> : null}</span><span className="member-name"><strong>{member.displayName}</strong>{member.isYou && <small> (you)</small>}{member.isHost && <small> · host</small>}<small className="member-state">{member.ready ? 'Requirements confirmed' : 'Waiting on requirements'}</small></span>{room.viewerIsHost && !member.isHost && !member.ready && <button className="text-button member-remove" disabled={action.busy} onClick={() => remove(member.id, member.displayName)}>Remove</button>}{member.isYou && !member.isHost && room.status !== 'BOOKED' && <button className="text-button member-remove" disabled={action.busy} onClick={leave}>Leave group</button>}</li>)}</ul>
-    {room.viewerIsHost && <><p className="fine">As host, you can remove members who haven’t confirmed their requirements yet.</p><Link className="text-button" to={`${base}/demo/merchant`}>Open demo event controls <ArrowRight size={14} /></Link></>}
+    {room.viewerIsHost && <p className="fine">As host, you can remove members who haven’t confirmed their requirements yet.</p>}
     <ErrorNotice error={action.error} />
   </section>;
 }
+function MerchantDemoCallout({ base }: { base: string }) {
+  return <section className="panel decision-invitation merchant-demo-callout">
+    <Zap size={22} />
+    <Tag>Host demo</Tag>
+    <h3>Simulate a real-world change</h3>
+    <p>See what happens when a merchant changes price or terms after everyone has approved.</p>
+    <LinkButton to={`${base}/demo/merchant`}>Demo: change the offer</LinkButton>
+  </section>;
+}
 function LiveLabel({ connection }: { connection: string }) { return <span className={`live-label ${connection === 'live' ? '' : 'offline'}`}><span />{connection === 'live' ? 'Live with your group' : connection === 'connecting' ? 'Connecting…' : 'Reconnecting · checking for updates'}</span>; }
+
+/** Contextual, real-data link to the public market dashboard — hidden whenever Tiger is unconfigured or there's nothing yet worth surfacing. */
+function MarketPulseCallout({ room, base }: { room: PublicRoomDTO; base: string }) {
+  const capabilities = useResource<Capabilities>('/capabilities');
+  const tigerAvailable = capabilities.data?.tiger.available === true;
+  const roomPulse = useResource<RoomPulseDTO>(tigerAvailable && room.trip ? `${base}/pulse` : null);
+  if (!tigerAvailable || !room.trip || !roomPulse.data || roomPulse.data.observations === 0) return null;
+  return <section className="panel pulse-callout">
+    <Activity size={20} />
+    <h3>Nobody can quietly reprice this trip.</h3>
+    <p>Accord has checked <strong>{roomPulse.data.observations.toLocaleString('en-US')}</strong> live {roomPulse.data.observations === 1 ? 'price' : 'prices'} across {roomPulse.data.listings.toLocaleString('en-US')} {roomPulse.data.listings === 1 ? 'listing' : 'listings'} for your group’s exact dates and guest count, timestamped in Tiger Data — the same record Accord uses to void a proposal the moment a price moves.</p>
+    <Link to="/pulse" className="text-button">See the live market <ArrowRight size={15} /></Link>
+  </section>;
+}
 
 export function Room() {
   const { roomId = '' } = useParams();
@@ -78,6 +101,8 @@ export function Room() {
         <Inbox roomId={roomId} revision={live.revision} />
         {proposal.data && <Funding proposal={proposal.data.proposal} />}
         <Members room={room.data} base={base} onChange={room.refresh} />
+        {room.data.viewerIsHost && <MerchantDemoCallout base={base} />}
+        <MarketPulseCallout room={room.data} base={base} />
         <section className="private-mini"><LockKeyhole size={20} /><h3>Your boundaries. Your business.</h3><p>Only you can see and edit your personal requirements.</p><Link to={`${base}/me/summary`} className="text-button">My private space <ArrowRight size={15} /></Link></section>
         {events.data && <Timeline events={events.data.events} />}<ErrorNotice error={events.error} retry={events.refresh} />
       </aside></div>
@@ -230,15 +255,15 @@ export function Merchant() {
       })}>{label}<ArrowRight size={15} /></Button>)}</div></>}
       <p role="status">{lastAction}</p><ErrorNotice error={action.error} /><hr />
       {confirmReset ? <div><p>Reset the demo’s rooms, sessions, merchant offers, and payment ledger? Existing browser sessions will be signed out.</p><div className="button-row"><Button disabled={action.busy} onClick={() => action.run(async () => { await post('/demo/reset', { confirmed: true }); setConfirmReset(false); setLastAction('Demo reset confirmed by backend.'); resource.refresh(); analytics.refresh(); })}>Confirm demo reset</Button><Button className="secondary" onClick={() => setConfirmReset(false)}>Cancel</Button></div></div> : <Button className="secondary" onClick={() => setConfirmReset(true)}><RefreshCw size={15} />Reset demo</Button>}
-    </section><aside>{analytics.data?.source === 'TIGER' ? <TigerChart data={analytics.data} /> : <section className="panel"><h3>Transaction timeline</h3><p className="subtle">Tiger-backed analytics are unavailable. No observed timeline is shown.</p></section>}</aside></div>}
+    </section><aside>{analytics.data?.source === 'TIGER' ? <TigerChart data={analytics.data} /> : <section className="panel"><h3>Proof this offer hasn't quietly changed</h3><Empty title="Tiger-backed analytics are unavailable.">No observed price timeline can be shown here without Tiger Data configured — nothing is fabricated in its place.</Empty></section>}</aside></div>}
   </div>;
 }
 function TigerChart({ data }: { data: AnalyticsDTO }) {
   const points = data.points.filter(point => Number.isFinite(point.totalCents) && Number.isFinite(Date.parse(point.at)));
-  if (!points.length) return <section className="panel"><h3>Transaction timeline</h3><p>No Tiger events to plot yet.</p></section>;
+  if (!points.length) return <section className="panel"><h3>Proof this offer hasn't quietly changed</h3><Empty title="No recorded price events yet.">Every merchant mutation you trigger below is written to Tiger Data and appears here immediately, timestamped — this is what lets Accord catch a repriced offer after a group has already approved it.</Empty></section>;
   const times = points.map(point => Date.parse(point.at));
   const minTime = Math.min(...times), maxTime = Math.max(...times);
   const min = Math.min(...points.map(point => point.totalCents)), max = Math.max(...points.map(point => point.totalCents));
   const coords = points.map(point => ({ x: 65 + (Date.parse(point.at) - minTime) / Math.max(1, maxTime - minTime) * 410, y: 180 - (point.totalCents - min) / Math.max(1, max - min) * 135 }));
-  return <section className="panel"><h3>Live transaction timeline</h3><p className="subtle">Actual persisted Tiger events · This planning session</p><svg className="timeline-chart" viewBox="0 0 500 220" role="img" aria-label="Offer price at recorded transaction events"><line x1="65" x2="480" y1="180" y2="180" stroke="#c9cec6" /><text x="0" y="48">{money(max)}</text><text x="0" y="184">{money(min)}</text><polyline fill="none" stroke="#356650" strokeWidth="2" points={coords.map(p => `${p.x},${p.y}`).join(' ')} />{coords.map((point, i) => <circle key={i} cx={point.x} cy={point.y} r="5" fill="#356650"><title>{points[i].label}: {money(points[i].totalCents)} at {dateTime(points[i].at)}</title></circle>)}</svg><ol className="chart-legend">{points.map((point, index) => <li key={index}><span>{point.label}</span><strong>{money(point.totalCents)}</strong><time>{dateTime(point.at)}</time></li>)}</ol></section>;
+  return <section className="panel"><h3>Proof this offer hasn't quietly changed</h3><p className="subtle">Every recorded price for this offer, straight from Tiger Data · this planning session</p><svg className="timeline-chart" viewBox="0 0 500 220" role="img" aria-label="Offer price at recorded transaction events"><line x1="65" x2="480" y1="180" y2="180" stroke="#c9cec6" /><text x="0" y="48">{money(max)}</text><text x="0" y="184">{money(min)}</text><polyline fill="none" stroke="#2a78d6" strokeWidth="2" points={coords.map(p => `${p.x},${p.y}`).join(' ')} />{coords.map((point, i) => <circle key={i} cx={point.x} cy={point.y} r="5" fill="#2a78d6"><title>{points[i].label}: {money(points[i].totalCents)} at {dateTime(points[i].at)}</title></circle>)}</svg><ol className="chart-legend">{points.map((point, index) => <li key={index}><span>{point.label}</span><strong>{money(point.totalCents)}</strong><time>{dateTime(point.at)}</time></li>)}</ol></section>;
 }

@@ -15,6 +15,8 @@ import { RoomStreams } from "../../integrations/src/realtime.js";
 import { MemoryMerchantStore } from "./memory-merchant.js";
 import type { ExternalRef, GoogleHotels, LiteApi, LiteRef, LiveStay, ProviderResult, StayResearch } from "./stays.js";
 import type { PaymentGateway } from "./payments.js";
+import type { SolanaCommitmentsPort, CommitmentInput } from "../../integrations/src/solana.js";
+import type { Backboard } from "../../integrations/src/backboard.js";
 import { SESSION_TTL_SECONDS, type MongoPersistence, type RoomAggregate, type SealedValue, type SessionRecord } from "./persistence.js";
 import { consumePasswordCost, hashPassword, normalizeEmail, verifyPassword } from "./auth.js";
 import type { Pulse } from "./pulse.js";
@@ -29,8 +31,14 @@ export type InboxEntry = {
     /** DATES nudges: the exact trip days the member is asked to make. */
     window?: DateWindow };
 };
-export type Member = { id: string; userId: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number; inbox?: InboxEntry[] };
-type User = { id: string; displayName: string; createdAt: string; email?: string; passwordSalt?: string; passwordHash?: string };
+export type Member = { id: string; userId: string; roomId: string; displayName: string; constraints: Constraints | null; confirmedAt?: string; capsuleVersion: number; inbox?: InboxEntry[];
+  /** Backboard memory ids this member has explicitly re-confirmed for use in this trip. Ids only, never preference content. */
+  appliedMemoryIds?: string[] };
+/** Reusable, non-financial preference labels an explicitly-confirmed Backboard memory may hold. */
+export type MemoryPreference = "WALKABLE" | "QUIET" | "NEAR_ACTIVITIES" | "REFUNDABLE";
+type User = { id: string; displayName: string; createdAt: string; email?: string; passwordSalt?: string; passwordHash?: string;
+  /** Backboard assistant provisioned for this user's own explicitly-confirmed reusable preferences. Never a financial record. */
+  assistantId?: string };
 type Approval = { proposalHash: string; status: "APPROVED" | "INVALIDATED"; approvedAt: string };
 type Authorization = { proposalHash: string; amountCents: number; status: "AUTHORIZED" | "INVALIDATED" | "CAPTURED" | "RELEASED" | "FAILED"; providerRef: string; captureRef?: string; reversalRef?: string };
 type PaymentLedgerEntry = {
@@ -50,6 +58,8 @@ export type Proposal = {
   providerRef?: LiteRef | ExternalRef;
   /** Coordinator bookkeeping while the group decides; not part of the hashed snapshot. */
   watch?: { lastCheckedAt?: string; remindedAt?: string; expiryWarnedAt?: string };
+  /** Best-effort Solana devnet commitment of this exact proposal hash; never authoritative and never part of the hashed snapshot. */
+  solana?: { status: "PENDING" | "CONFIRMED" | "FAILED"; transactionSignature?: string; explorerUrl?: string; code?: string };
 };
 type LiveSearch = {
   searchedAt: string; googleSearchedAt?: string; offerIds: string[]; providers: ProviderResult[];
@@ -66,6 +76,10 @@ export type StayProviders = {
   suggestAlternatives?: (input: AlternativesInput) => Promise<string[] | undefined>;
   /** Advisory only: proposes destinations from anonymous planning totals. */
   suggestDestinations?: (input: DestinationsInput) => Promise<DestinationIdea[] | undefined>;
+  /** Best-effort devnet commitment of the proposal hash; never authoritative over consent. */
+  solana?: SolanaCommitmentsPort;
+  /** Opt-in reusable member preferences; never current-trip budgets or financial data. */
+  backboard?: Backboard;
 };
 const GOOGLE_CACHE_MS = 30 * 60 * 1000;
 const GROUP_PAYMENT_KEY = "__shared_group_payment__";
@@ -108,6 +122,9 @@ function compatibleOffer(value: Offer | Record<string, unknown>): Offer {
     checkOutDate: input.checkOutDate ?? String(input.checkOutAt).slice(0, 10),
     checkInTimeKnown: input.checkInTimeKnown ?? true,
     checkOutTimeKnown: input.checkOutTimeKnown ?? true,
+    // A provider can report these as JSON null rather than omitting them; the schema treats "unknown" as absent, not null.
+    rating: input.rating ?? undefined,
+    reviewCount: input.reviewCount ?? undefined,
   });
 }
 type MerchantBackend = {
@@ -412,6 +429,62 @@ export class AccordState {
     }
     return this.accountDTO(session);
   }
+  /** Provisions (once) and caches the Backboard assistant for this account. Never called from user-supplied identifiers. */
+  async #ensureAssistant(user: User): Promise<string | undefined> {
+    if (user.assistantId) return user.assistantId;
+    const backboard = this.providers.backboard;
+    if (!backboard) return undefined;
+    const result = await backboard.createAssistant();
+    if (result.status !== "OK") return undefined;
+    user.assistantId = result.value.assistant_id;
+    this.#dirtyUsers.add(user.id);
+    await this.flush();
+    return user.assistantId;
+  }
+  /** Reusable preferences this member previously confirmed with Backboard. Never includes current-trip budgets or financial data. */
+  async memories(session: SessionRecord, member: Member) {
+    if (!this.providers.backboard) throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const user = this.users.get(session.userId);
+    if (!user) throw new AppError(401, "SESSION_REQUIRED");
+    const assistantId = await this.#ensureAssistant(user);
+    if (!assistantId) throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const result = await this.providers.backboard.recall(assistantId);
+    if (result.status !== "OK") throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    return { source: "BACKBOARD" as const, memories: result.value.map(memory => ({ id: memory.id, label: memory.content, applied: member.appliedMemoryIds?.includes(memory.id) ?? false })) };
+  }
+  /** Re-confirms a previously-remembered preference for use in THIS trip. Only ever runs after the member's own explicit confirmation in this request. */
+  async applyMemory(session: SessionRecord, member: Member, memoryId: string) {
+    const backboard = this.providers.backboard;
+    if (!backboard) throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const user = this.users.get(session.userId);
+    if (!user) throw new AppError(401, "SESSION_REQUIRED");
+    const assistantId = await this.#ensureAssistant(user);
+    if (!assistantId) throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const recalled = await backboard.recall(assistantId);
+    if (recalled.status !== "OK") throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const memory = recalled.value.find(item => item.id === memoryId);
+    const preference = memory?.metadata?.preference;
+    const preferences: MemoryPreference[] = ["WALKABLE", "QUIET", "NEAR_ACTIVITIES", "REFUNDABLE"];
+    if (!memory || typeof preference !== "string" || !preferences.includes(preference as MemoryPreference)) throw new AppError(404, "MEMORY_NOT_FOUND");
+    const result = await backboard.remember(assistantId, preference as MemoryPreference, true);
+    if (result.status !== "OK") throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    if (!member.appliedMemoryIds?.includes(memoryId)) { member.appliedMemoryIds = [...(member.appliedMemoryIds ?? []), memoryId]; this.#dirtyRooms.add(member.roomId); }
+    return { source: "BACKBOARD" as const, id: memoryId, label: memory.content, applied: true as const };
+  }
+  /** Creates a brand-new Backboard memory from a preference the member just explicitly confirmed. Never runs without that confirmation. */
+  async rememberPreference(session: SessionRecord, member: Member, preference: MemoryPreference) {
+    const backboard = this.providers.backboard;
+    if (!backboard) throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const user = this.users.get(session.userId);
+    if (!user) throw new AppError(401, "SESSION_REQUIRED");
+    const assistantId = await this.#ensureAssistant(user);
+    if (!assistantId) throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const result = await backboard.remember(assistantId, preference, true);
+    if (result.status !== "OK") throw new AppError(503, "BACKBOARD_UNAVAILABLE");
+    const memory = result.value;
+    if (!member.appliedMemoryIds?.includes(memory.id)) { member.appliedMemoryIds = [...(member.appliedMemoryIds ?? []), memory.id]; this.#dirtyRooms.add(member.roomId); }
+    return { source: "BACKBOARD" as const, id: memory.id, label: memory.content, applied: true as const };
+  }
   /** Compatibility entry point used by the HTTP layer; the coordinator owns scheduling and locking. */
   beginSolveWhenReady(room: Room) {
     this.autopilot.kick(room, "READY");
@@ -658,6 +731,7 @@ export class AccordState {
       ? `Accord found a new option: ${offer.propertyName} in ${offer.city}, ${share} each. Proposal v${version} needs everyone’s fresh approval.`
       : `Accord proposed ${offer.propertyName} in ${offer.city}: ${share} each (Proposal v${version}).`;
     this.emit(room, "PROPOSAL_CREATED", title, id, { actor: "ACCORD", detail: "It meets every member’s confirmed requirements. Nothing is booked until each person approves their exact share." });
+    void this.#recordSolanaCommitment(room, proposal, "PROPOSAL_CREATED");
     return this.publicProposal(proposal);
   }
   requireProposal(id: string, session?: SessionRecord) {
@@ -679,7 +753,10 @@ export class AccordState {
       approval: { approvedCount: approved.length, requiredCount: proposal.snapshot.memberIds.length },
       authorization: { status: paymentStatus, transactionCount: shared?.providerRef ? 1 : 0,
         authorizedTotalCents: funded ? shared.amountCents : 0, requiredTotalCents: offer.totalCents },
-      expiresAt: proposal.snapshot.expiresAt, solana: { status: "NOT_RECORDED" },
+      expiresAt: proposal.snapshot.expiresAt,
+      solana: proposal.solana
+        ? { status: proposal.solana.status, ...(proposal.solana.transactionSignature ? { transactionSignature: proposal.solana.transactionSignature } : {}), ...(proposal.solana.explorerUrl ? { explorerUrl: proposal.solana.explorerUrl } : {}) }
+        : { status: "NOT_RECORDED" },
       watch: { lastCheckedAt: proposal.watch?.lastCheckedAt ?? proposal.snapshot.createdAt,
         method: offer.source === "LITEAPI" ? "PROVIDER_REQUOTE" : offer.source === "GOOGLE_HOTELS" ? "SEARCH_TIME" : "RECORD" } };
     return { roomId: room.id, proposal: publicProposal,
@@ -814,6 +891,7 @@ export class AccordState {
     proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
     try { await this.store.drain(async (_eventId, event) => { if (event.type === "BOOKING_CONFIRMED") this.emit(room, "BOOKING_CONFIRMED", "One controlled demo booking was confirmed.", proposal.id); }); }
     catch { /* Booking is confirmed. A failed optional event fanout cannot erase the receipt. */ }
+    void this.#recordSolanaCommitment(room, proposal, "BOOKING_CONFIRMED");
     return this.receipt(room);
   }
   async #authorizeSharedPayment(proposal: Proposal, room: Room) {
@@ -914,6 +992,7 @@ export class AccordState {
       await this.#captureSharedPayment(proposal, room);
       proposal.state = "BOOKED"; this.#dirtyRooms.add(room.id);
       this.emit(room, "BOOKING_CONFIRMED", `Nuitée Connect sandbox booking ${result.bookingId} and one shared CyberSource sandbox payment confirmed.`, proposal.id);
+      void this.#recordSolanaCommitment(room, proposal, "BOOKING_CONFIRMED");
       return this.receipt(room);
     });
   }
@@ -975,6 +1054,23 @@ export class AccordState {
       await this.flush();
     } catch { /* Research is optional. */ }
   }
+  /** Best-effort devnet commitment of this exact proposal version. Never blocks or changes consent/booking. */
+  async #recordSolanaCommitment(room: Room, proposal: Proposal, eventType: CommitmentInput["eventType"]) {
+    const solana = this.providers.solana;
+    if (!solana) return;
+    try {
+      const input: CommitmentInput = { roomPublicRef: room.id, proposalId: proposal.id, proposalVersion: proposal.version, proposalHash: proposal.hash, eventType };
+      const result = await solana.record(input, async pending => {
+        proposal.solana = { status: "PENDING", transactionSignature: pending.transactionSignature };
+        this.#dirtyRooms.add(room.id);
+        await this.flush();
+      });
+      proposal.solana = { status: result.status, ...(result.transactionSignature ? { transactionSignature: result.transactionSignature } : {}),
+        ...(result.explorerUrl ? { explorerUrl: result.explorerUrl } : {}), ...(result.code ? { code: result.code } : {}) };
+      this.#dirtyRooms.add(room.id);
+      await this.flush();
+    } catch { /* Advisory only; never affects consent or booking. */ }
+  }
   receipt(room: Room): ReceiptDTO {
     if (!room.booking) throw new AppError(404, "BOOKING_NOT_FOUND");
     const proposal = this.proposals.get(room.booking.proposalId)!, offer = proposal.snapshot.offer;
@@ -1005,6 +1101,7 @@ export class AccordState {
       { actor: "ACCORD", detail: "Old approvals can’t be used for changed terms, so nothing was booked." });
     for (const id of room.memberIds) this.streams.publishPrivate(room.id, id, randomUUID(), { roomId: room.id, type: "PROPOSAL_STALE", proposalId: proposal.id, at: nowIso() });
     if (this.#sharedPayment(proposal)?.providerRef) setImmediate(() => void this.#releaseSharedPayment(proposal, room).catch(() => undefined));
+    void this.#recordSolanaCommitment(room, proposal, "PROPOSAL_STALE");
     this.autopilot.onStale(room, proposal);
   }
   async mutate(offerId: string, expectedVersion: string, mutation: MerchantMutation) {
@@ -1060,6 +1157,7 @@ export class AccordState {
       }),
       proposals: [...this.proposals.values()].filter(proposal => proposal.roomId === room.id).map(proposal => ({
         _id: proposal.id, roomId: proposal.roomId, version: proposal.version, hash: proposal.hash, state: proposal.state, providerRef: proposal.providerRef ?? null, watch: proposal.watch ?? null,
+        solana: proposal.solana ?? null,
         snapshot: structuredClone(proposal.snapshot),
         approvals: Object.fromEntries(proposal.approvals), authorizations: Object.fromEntries(proposal.authorizations), ledger: structuredClone(proposal.ledger),
       })),
@@ -1108,7 +1206,7 @@ export class AccordState {
         ...(sealedInbox ? { inbox: sealer.open<InboxEntry[]>(sealedInbox as SealedValue) } : {}) });
     }
     for (const doc of data.proposals) {
-      this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state, ...(doc.providerRef ? { providerRef: doc.providerRef } : {}), ...(doc.watch ? { watch: doc.watch } : {}),
+      this.proposals.set(String(doc._id), { id: String(doc._id), roomId: doc.roomId, version: doc.version, hash: doc.hash, state: doc.state, ...(doc.providerRef ? { providerRef: doc.providerRef } : {}), ...(doc.watch ? { watch: doc.watch } : {}), ...(doc.solana ? { solana: doc.solana } : {}),
         snapshot: { ...doc.snapshot, offer: compatibleOffer(doc.snapshot.offer) }, approvals: new Map(Object.entries(doc.approvals ?? {})), authorizations: new Map(Object.entries(doc.authorizations ?? {})),
         ledger: Array.isArray(doc.ledger) ? doc.ledger as PaymentLedgerEntry[] : [] });
     }

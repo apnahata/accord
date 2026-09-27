@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { LogOut, Plus, Users } from 'lucide-react';
+import { Activity, LogOut, Plus, Users } from 'lucide-react';
 import { Brand, Button } from './components';
 import { Landing, NewRoom, JoinRoom, JoinEntry } from './pages-entry';
 import { Summary } from './pages-private';
@@ -29,10 +29,12 @@ function App() {
         <Link to="/me">Dashboard</Link>
         <Link to="/rooms/new"><Plus size={14} />New group</Link>
         <Link to="/join"><Users size={14} />Join</Link>
+        <Link to="/pulse"><Activity size={14} />Market pulse</Link>
         <span className="account-name">{signedIn.user.displayName}</span>
         <Button className="nav-signout" aria-label="Sign out" disabled={signOut.busy} onClick={() => signOut.run(async () => { await post('/logout'); navigate('/auth', { replace: true }); })}><LogOut size={15} /></Button>
       </> : <>
         <a className="how-link" href="/#how-it-works">How it works</a>
+        <Link to="/pulse"><Activity size={14} />Market pulse</Link>
         <Link to="/auth?next=%2Fme">Sign in</Link>
         <Link to="/auth?next=%2Frooms%2Fnew" className="nav-join">Create account</Link>
       </>}

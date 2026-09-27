@@ -9,6 +9,20 @@ import { BoundaryList, Voice } from './pages-private';
 import { readTripAnswers, TripAnswerFields, TripAnswerList } from './planning';
 
 type ConversationMessage = { role: 'user' | 'assistant'; content: string };
+type MemoryPreference = 'WALKABLE' | 'QUIET' | 'NEAR_ACTIVITIES' | 'REFUNDABLE';
+const MEMORY_PROMPT_LABELS: Record<MemoryPreference, string> = {
+  WALKABLE: 'walkable neighborhoods', QUIET: 'quiet properties', NEAR_ACTIVITIES: 'staying near activities', REFUNDABLE: 'refundable options',
+};
+/** Best-effort match from what the member just confirmed. Never invents a preference they didn't state. */
+function matchMemoryPreferences(constraints: Constraints): MemoryPreference[] {
+  const text = (constraints.softPreference || '').toLowerCase();
+  const matches: MemoryPreference[] = [];
+  if (/\bwalk/.test(text)) matches.push('WALKABLE');
+  if (/\bquiet|\bpeaceful|\bcalm/.test(text)) matches.push('QUIET');
+  if (/\bactivit/.test(text)) matches.push('NEAR_ACTIVITIES');
+  if (constraints.requiresFullCashRefund) matches.push('REFUNDABLE');
+  return matches;
+}
 type IntakeReply = {
   stage: 'CLARIFYING' | 'REVIEW';
   reply: string;
@@ -35,8 +49,11 @@ export function Intake() {
   const [edit, setEdit] = useState<Constraints>();
   const [forceManual, setForceManual] = useState(false);
   const [voiceError, setVoiceError] = useState<Error>();
+  const [rememberPrompts, setRememberPrompts] = useState<MemoryPreference[]>();
+  const [rememberedIds, setRememberedIds] = useState<Set<MemoryPreference>>(new Set());
   const values = edit || capsule.data?.constraints;
   const aiAvailable = capabilities.data?.ai.available === true;
+  const backboardAvailable = capabilities.data?.backboard.available === true;
 
   async function send(value: string) {
     const content = value.trim();
@@ -83,7 +100,27 @@ export function Intake() {
     />
     {capsule.loading && <Loading />}
     <ErrorNotice error={capsule.error} retry={capsule.refresh} />
-    {capsule.data && (draft ? <section className="panel confirmation">
+    {capsule.data && (rememberPrompts ? <section className="panel confirmation">
+      <Tag><Sparkles size={14} />Remember for next time</Tag>
+      <h2>Should Accord remember any of this?</h2>
+      <p className="subtle">These would carry over to your future trips. Nothing is saved unless you choose it.</p>
+      <ul className="memory-list">
+        {rememberPrompts.map(preference => <li key={preference}>
+          <div><strong>Remember {MEMORY_PROMPT_LABELS[preference]} for future trips?</strong></div>
+          {rememberedIds.has(preference)
+            ? <Check size={19} />
+            : <div className="button-row">
+              <Button className="secondary small" disabled={action.busy} onClick={() => action.run(async () => {
+                await post(path + '/me/memories', { preference, confirmed: true });
+                setRememberedIds(previous => new Set(previous).add(preference));
+              })}>Remember</Button>
+              <Button className="secondary small" onClick={() => setRememberPrompts(previous => previous?.filter(item => item !== preference))}>Not this trip</Button>
+            </div>}
+        </li>)}
+      </ul>
+      <ErrorNotice error={action.error} />
+      <Button onClick={() => navigate(path + '/me/summary')}>Continue<ArrowRight size={17} /></Button>
+    </section> : draft ? <section className="panel confirmation">
       <Tag><Sparkles size={14} />{source === 'ai' ? 'Accord’s draft' : 'Ready for your confirmation'}</Tag>
       <h2>Your boundaries, in your words.</h2>
       <BoundaryList constraints={draft} />
@@ -97,7 +134,9 @@ export function Intake() {
       <div className="button-row">
         <Button disabled={action.busy} onClick={() => action.run(async () => {
           await post(path + '/me/constraints', { ...draft, confirmed: true });
-          navigate(path + '/me/summary');
+          const matches = backboardAvailable ? matchMemoryPreferences(draft) : [];
+          if (matches.length) setRememberPrompts(matches);
+          else navigate(path + '/me/summary');
         })}>{action.busy ? 'Saving privately…' : 'Confirm my requirements'}<Check size={17} /></Button>
         {source === 'ai' && <Button className="secondary" onClick={() => setDraft(undefined)}>Keep talking</Button>}
         <Button className="secondary" onClick={() => { setEdit(draft); setForceManual(true); setDraft(undefined); }}>Edit details</Button>
